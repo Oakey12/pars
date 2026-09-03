@@ -34,6 +34,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	walkOID := flags.String("walk-oid", "", "include a diagnostic OID walk in -ip JSON output; use auto for the vendor enterprise tree")
 	format := flags.String("format", "table", "output format: table, json, or csv")
 	outputPath := flags.String("out", "", "write output to a file instead of stdout")
+	excelPath := flags.String("excel", "printer-history.xlsx", "append every run to this Excel history file")
+	noExcel := flags.Bool("no-excel", false, "do not update the Excel history file")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -142,6 +144,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if err := output.Write(writer, *format, collected); err != nil {
 		fmt.Fprintln(stderr, "output error:", err)
 		return 1
+	}
+	if !*noExcel {
+		if _, err := output.AppendExcel(*excelPath, collected); err != nil {
+			fmt.Fprintln(stderr, "Excel error:", err)
+			return 1
+		}
+		fmt.Fprintf(stderr, "Excel updated: %s (%d new rows)\n", *excelPath, len(collected))
 	}
 
 	for _, result := range collected {
