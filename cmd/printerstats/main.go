@@ -27,6 +27,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	community := flags.String("community", "public", "SNMP community for -ip mode")
 	port := flags.Uint("port", 161, "SNMP UDP port for -ip mode")
 	version := flags.String("version", "auto", "SNMP version for -ip mode: auto, 1, or 2c")
+	protocol := flags.String("protocol", "auto", "collection protocol for -ip mode: auto, snmp, or http")
+	httpURL := flags.String("http-url", "", "optional counter/status page URL for -ip HTTP mode")
 	timeout := flags.Duration("timeout", 3*time.Second, "SNMP timeout for -ip mode")
 	retries := flags.Int("retries", 1, "SNMP retries for -ip mode")
 	walkOID := flags.String("walk-oid", "", "include a diagnostic OID walk in -ip JSON output; use auto for the vendor enterprise tree")
@@ -59,6 +61,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "configuration error: -version must be auto, 1, or 2c")
 			return 2
 		}
+		if *protocol != "auto" && *protocol != "snmp" && *protocol != "http" {
+			fmt.Fprintln(stderr, "configuration error: -protocol must be auto, snmp, or http")
+			return 2
+		}
 		if *timeout <= 0 || *retries < 0 {
 			fmt.Fprintln(stderr, "configuration error: -timeout must be positive and -retries cannot be negative")
 			return 2
@@ -72,6 +78,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 				Port:      uint16(*port),
 				Community: *community,
 				Version:   *version,
+				Protocol:  *protocol,
+				HTTPURL:   *httpURL,
 			}},
 		}
 	} else {
@@ -82,7 +90,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	snmpCollector := collector.SNMP{Timeout: cfg.ParsedTimeout, Retries: *cfg.Retries, DiagnosticOID: *walkOID, MaxDiagnosticOIDs: 500}
+	hybridCollector := collector.Hybrid{
+		SNMP: collector.SNMP{Timeout: cfg.ParsedTimeout, Retries: *cfg.Retries, DiagnosticOID: *walkOID, MaxDiagnosticOIDs: 500},
+		Web:  collector.Web{Timeout: cfg.ParsedTimeout + 2*time.Second, MaxPages: 24, MaxBodyBytes: 2 << 20},
+	}
 	jobs := make(chan config.Printer)
 	results := make(chan collector.Result)
 	var workers sync.WaitGroup
@@ -91,7 +102,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		go func() {
 			defer workers.Done()
 			for printer := range jobs {
-				results <- snmpCollector.Collect(printer)
+				results <- hybridCollector.Collect(printer)
 			}
 		}()
 	}

@@ -19,8 +19,30 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ParsedTimeout != 3*time.Second || *cfg.Retries != 1 || cfg.Concurrency != 8 {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
-	if got := cfg.Printers[0]; got.Port != 161 || got.Community != "public" || got.Version != "2c" || !got.IsEnabled() {
+	if got := cfg.Printers[0]; got.Port != 161 || got.Community != "public" || got.Version != "2c" || got.Protocol != "auto" || !got.IsEnabled() {
 		t.Fatalf("unexpected printer defaults: %+v", got)
+	}
+}
+
+func TestLoadAcceptsHTTPProtocol(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "printers.json")
+	data := `{"printers":[{"name":"A","address":"192.0.2.10","protocol":"http","http_url":"http://192.0.2.10/counter"}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("http protocol rejected: %v", err)
+	}
+}
+
+func TestLoadRejectsHTTPURLForAnotherHost(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "printers.json")
+	data := `{"printers":[{"name":"A","address":"192.0.2.10","http_url":"http://192.0.2.11/counter"}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected http_url host validation error")
 	}
 }
 

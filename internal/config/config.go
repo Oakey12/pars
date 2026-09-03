@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -36,6 +37,8 @@ type Printer struct {
 	SerialNumber    string `json:"serial_number,omitempty"`
 	Community       string `json:"community,omitempty"`
 	Version         string `json:"version,omitempty"`
+	Protocol        string `json:"protocol,omitempty"`
+	HTTPURL         string `json:"http_url,omitempty"`
 	Enabled         *bool  `json:"enabled,omitempty"`
 	Note            string `json:"note,omitempty"`
 }
@@ -110,6 +113,18 @@ func (f *File) applyDefaultsAndValidate() error {
 		}
 		if p.Version != "auto" && p.Version != "1" && p.Version != "2c" {
 			return fmt.Errorf("printers[%d].version must be \"auto\", \"1\", or \"2c\"", i)
+		}
+		if p.Protocol == "" {
+			p.Protocol = "auto"
+		}
+		if p.Protocol != "auto" && p.Protocol != "snmp" && p.Protocol != "http" {
+			return fmt.Errorf("printers[%d].protocol must be \"auto\", \"snmp\", or \"http\"", i)
+		}
+		if p.HTTPURL != "" {
+			u, err := url.Parse(p.HTTPURL)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() != p.Address {
+				return fmt.Errorf("printers[%d].http_url must be an http(s) URL for %s", i, p.Address)
+			}
 		}
 		key := net.JoinHostPort(p.Address, fmt.Sprint(p.Port))
 		if _, exists := seen[key]; exists {

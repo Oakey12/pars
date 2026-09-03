@@ -28,7 +28,7 @@
     {"name":"Kyocera M2035dn AP","address":"192.168.80.30","location":"ПРОИЗВОДСТВО"},
     {"name":"Canon MF4700","address":"192.168.30.31","location":"ПРОИЗВОДСТВО"},
 
-    {"name":"Kyocera M2040dn","address":"192.168.50.30","location":"Офис Екатеринбург","serial_number":"VCF8312300"},
+    {"name":"Kyocera M2040dn","address":"192.168.50.30","location":"Офис Екатеринбург","serial_number":"VCF8312300","protocol":"http"},
     {"name":"Kyocera M2030dn — Старый, не подключён","address":"192.168.50.151","location":"Офис Екатеринбург","enabled":false},
     {"name":"Kyocera P3155dn — Резерв","address":"192.168.50.33","location":"Офис Екатеринбург","serial_number":"R4B0561136"},
     {"name":"Kyocera P2335dn — Склад","address":"192.168.50.31","location":"Офис Екатеринбург","serial_number":"R5J8708468"},

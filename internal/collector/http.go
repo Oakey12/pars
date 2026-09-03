@@ -1,0 +1,635 @@
+package collector
+
+import (
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+
+	"golang.org/x/net/html"
+	"golang.org/x/net/html/charset"
+
+	"printerstats/internal/config"
+)
+
+const (
+	defaultMaxHTTPPages = 24
+	defaultMaxHTTPBody  = int64(2 << 20)
+)
+
+var (
+	numberPattern  = regexp.MustCompile(`[0-9][0-9\s.,\x{00a0}]*`)
+	percentPattern = regexp.MustCompile(`(?i)([0-9]{1,3}(?:[.,][0-9]+)?)\s*%`)
+	rawLinkPattern = regexp.MustCompile(`(?i)["']([^"'<>]{0,160}(?:counter|count|cnt|status|toner|supply|device|info|consum)[^"'<>]{0,100})["']`)
+)
+
+// Web reads public status pages exposed by a printer. It never submits forms
+// and follows links only on the configured printer IP.
+type Web struct {
+	Timeout      time.Duration
+	MaxPages     int
+	MaxBodyBytes int64
+}
+
+type crawlTarget struct {
+	URL   *url.URL
+	Depth int
+	Score int
+}
+
+func (w Web) Collect(printer config.Printer) Result {
+	result := newWebResult(printer)
+	candidates, err := webCandidates(printer)
+	if err != nil {
+		result.Error = "HTTP configuration: " + err.Error()
+		return result
+	}
+
+	var attemptErrors []string
+	best := result
+	for _, candidate := range candidates {
+		current, crawlErr := w.crawl(printer, candidate)
+		if crawlErr != nil {
+			attemptErrors = append(attemptErrors, candidate.Scheme+": "+crawlErr.Error())
+		}
+		if webResultScore(current) > webResultScore(best) {
+			best = current
+		}
+		if current.TotalPages != nil && current.ConsumablePercent != nil {
+			return current
+		}
+	}
+
+	if webResultScore(best) > 0 {
+		if len(attemptErrors) > 0 && best.Status != "error" {
+			best.Warnings = append(best.Warnings, strings.Join(attemptErrors, "; "))
+		}
+		return best
+	}
+	result.Error = "HTTP request failed"
+	if len(attemptErrors) > 0 {
+		result.Error += ": " + strings.Join(attemptErrors, "; ")
+	}
+	return result
+}
+
+func newWebResult(printer config.Printer) Result {
+	name := strings.TrimSpace(printer.Name)
+	if name == "" {
+		name = printer.Address
+	}
+	return Result{
+		CollectedAt:     time.Now().UTC(),
+		Name:            name,
+		Address:         printer.Address,
+		Location:        printer.Location,
+		InventoryNumber: printer.InventoryNumber,
+		SerialNumber:    printer.SerialNumber,
+		Status:          "error",
+	}
+}
+
+func webCandidates(printer config.Printer) ([]*url.URL, error) {
+	if printer.HTTPURL != "" {
+		u, err := url.Parse(printer.HTTPURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() != printer.Address {
+			return nil, fmt.Errorf("http_url must point to %s over HTTP or HTTPS", printer.Address)
+		}
+		return []*url.URL{u}, nil
+	}
+	return []*url.URL{
+		{Scheme: "http", Host: printer.Address, Path: "/"},
+		{Scheme: "https", Host: printer.Address, Path: "/"},
+	}, nil
+}
+
+func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
+	result := newWebResult(printer)
+	maxPages := w.MaxPages
+	if maxPages <= 0 {
+		maxPages = defaultMaxHTTPPages
+	}
+	maxBody := w.MaxBodyBytes
+	if maxBody <= 0 {
+		maxBody = defaultMaxHTTPBody
+	}
+	timeout := w.Timeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // Local printers commonly use self-signed certificates.
+	client := &http.Client{
+		Timeout:   timeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if req.URL.Hostname() != printer.Address {
+				return errors.New("redirect outside printer address refused")
+			}
+			return nil
+		},
+	}
+
+	queue := []crawlTarget{{URL: cloneURL(start), Score: 100}}
+	visited := make(map[string]bool)
+	var fetchErrors []string
+	for len(queue) > 0 && len(visited) < maxPages {
+		sort.SliceStable(queue, func(i, j int) bool { return queue[i].Score > queue[j].Score })
+		target := queue[0]
+		queue = queue[1:]
+		key := canonicalURL(target.URL)
+		if visited[key] {
+			continue
+		}
+		visited[key] = true
+
+		doc, raw, finalURL, err := fetchHTML(client, target.URL, maxBody)
+		if err != nil {
+			fetchErrors = append(fetchErrors, target.URL.String()+": "+err.Error())
+			continue
+		}
+		result.HTTPURL = finalURL.String()
+		parseWebPage(&result, doc)
+		if result.TotalPages != nil && result.ConsumablePercent != nil {
+			break
+		}
+		if target.Depth >= 3 {
+			continue
+		}
+		for _, link := range discoverLinks(doc, raw, finalURL, printer.Address) {
+			if !visited[canonicalURL(link)] {
+				queue = append(queue, crawlTarget{URL: link, Depth: target.Depth + 1, Score: linkScore(link.String())})
+			}
+		}
+	}
+
+	finishWebResult(&result)
+	if len(visited) == 0 || (result.Status == "error" && len(fetchErrors) > 0) {
+		return result, errors.New(strings.Join(fetchErrors, "; "))
+	}
+	return result, nil
+}
+
+func fetchHTML(client *http.Client, target *url.URL, maxBody int64) (*html.Node, []byte, *url.URL, error) {
+	req, err := http.NewRequest(http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, nil, target, err
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1")
+	req.Header.Set("User-Agent", "printerstats/1.0")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, target, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return nil, nil, resp.Request.URL, fmt.Errorf("HTTP %s", resp.Status)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return nil, nil, resp.Request.URL, err
+	}
+	if int64(len(raw)) > maxBody {
+		return nil, nil, resp.Request.URL, fmt.Errorf("response exceeds %d bytes", maxBody)
+	}
+	utf8Reader, err := charset.NewReader(strings.NewReader(string(raw)), resp.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, nil, resp.Request.URL, err
+	}
+	doc, err := html.Parse(utf8Reader)
+	return doc, raw, resp.Request.URL, err
+}
+
+func parseWebPage(result *Result, doc *html.Node) {
+	pageText := normalizeText(nodeText(doc))
+	lowerPage := strings.ToLower(pageText)
+	if containsAny(lowerPage, "command center rx", "kyocera", "printer", "принтер", "печать", "счетчик", "счётчик") {
+		result.DetectedAsPrinter = true
+		result.DetectionMethod = "printer web interface"
+	}
+	if title := documentTitle(doc); title != "" && result.DeviceDescription == "" {
+		result.DeviceDescription = title
+	}
+
+	metrics := result.PageMetrics
+	if metrics == nil {
+		metrics = &PageMetrics{}
+	}
+	for _, table := range findElements(doc, "table") {
+		parseCounterTable(metrics, table)
+	}
+	parseFlatCounters(metrics, lowerPage)
+	if !pageMetricsEmpty(metrics) {
+		result.PageMetrics = metrics
+		if metrics.PrintedTotal != nil {
+			result.TotalPages = metrics.PrintedTotal
+		}
+	}
+
+	for _, supply := range parseWebSupplies(doc) {
+		if !hasEquivalentSupply(result.Supplies, supply) {
+			result.Supplies = append(result.Supplies, supply)
+		}
+	}
+	if percent := lowestTonerPercent(result.Supplies); percent != nil {
+		result.TonerPercent = percent
+		result.ConsumablePercent = percent
+	}
+}
+
+func parseCounterTable(metrics *PageMetrics, table *html.Node) {
+	rows := tableRows(table)
+	if len(rows) == 0 {
+		return
+	}
+	joined := strings.ToLower(strings.Join(flattenRows(rows), " "))
+	isScanned := containsAny(joined, "scanned", "отсканирован", "страниц оригинала", "другое", "other") && !containsAny(joined, "printer", "принтер")
+	isPrinted := containsAny(joined, "printed", "напечатан", "printer", "принтер")
+	if !isPrinted && !isScanned {
+		return
+	}
+	for _, row := range rows {
+		if len(row) < 2 {
+			continue
+		}
+		label := strings.ToLower(row[0])
+		value, ok := lastNumber(row[1:])
+		if !ok {
+			continue
+		}
+		if isScanned {
+			switch {
+			case isLabel(label, "копирование", "copy"):
+				metrics.ScannedCopy = int64Pointer(value)
+			case isLabel(label, "другое", "other"):
+				metrics.ScannedOther = int64Pointer(value)
+			case isLabel(label, "факс", "fax"):
+				metrics.ScannedFax = int64Pointer(value)
+			case isLabel(label, "общий", "итого", "total"):
+				metrics.ScannedTotal = int64Pointer(value)
+			}
+		} else {
+			switch {
+			case isLabel(label, "копирование", "copy"):
+				metrics.PrintedCopy = int64Pointer(value)
+			case isLabel(label, "принтер", "printer"):
+				metrics.PrintedPrinter = int64Pointer(value)
+			case isLabel(label, "факс", "fax"):
+				metrics.PrintedFax = int64Pointer(value)
+			case isLabel(label, "общий", "итого", "total"):
+				metrics.PrintedTotal = int64Pointer(value)
+			}
+		}
+	}
+}
+
+func parseFlatCounters(metrics *PageMetrics, text string) {
+	printedStart := firstKeyword(text, "напечатанные страницы", "printed pages")
+	scannedStart := firstKeyword(text, "отсканированные страницы", "scanned pages")
+	if printedStart >= 0 && metrics.PrintedTotal == nil {
+		end := len(text)
+		if scannedStart > printedStart {
+			end = scannedStart
+		}
+		metrics.PrintedTotal = labelledNumber(text[printedStart:end], "общий", "итого", "total")
+	}
+	if scannedStart >= 0 && metrics.ScannedTotal == nil {
+		metrics.ScannedTotal = labelledNumber(text[scannedStart:], "общий", "итого", "total")
+	}
+}
+
+func parseWebSupplies(doc *html.Node) []Supply {
+	var supplies []Supply
+	for _, element := range append(findElements(doc, "tr"), findElements(doc, "li")...) {
+		text := normalizeText(nodeTextWithAttributes(element))
+		lower := strings.ToLower(text)
+		if !containsAny(lower, "toner", "тонер", "cartridge", "картридж") {
+			continue
+		}
+		match := percentPattern.FindStringSubmatch(text)
+		if len(match) != 2 {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
+		if err != nil || value < 0 || value > 100 {
+			continue
+		}
+		supplies = append(supplies, Supply{
+			Index:            "http." + strconv.Itoa(len(supplies)+1),
+			Description:      shorten(normalizeText(nodeText(element)), 100),
+			Class:            "consumed",
+			Type:             "toner",
+			Unit:             "percent",
+			RemainingPercent: float64Pointer(value),
+			PercentSource:    "printer web interface",
+			LevelState:       "value",
+		})
+	}
+	return supplies
+}
+
+func finishWebResult(result *Result) {
+	hasPages := result.TotalPages != nil
+	hasSupply := result.ConsumablePercent != nil
+	if hasPages || hasSupply {
+		result.MetricSources = []string{"http"}
+		result.DetectedAsPrinter = true
+		result.DetectionMethod = "printer web interface"
+	}
+	switch {
+	case hasPages && hasSupply:
+		result.Status = "ok"
+	case hasPages:
+		result.Status = "partial"
+		result.Warnings = append(result.Warnings, "toner level was not found on public web pages")
+	case hasSupply:
+		result.Status = "partial"
+		result.Warnings = append(result.Warnings, "printed page counter was not found on public web pages")
+	case result.DetectedAsPrinter:
+		result.Status = "partial"
+		result.Warnings = append(result.Warnings, "printer web interface found, but public counter and toner values were not recognized")
+	default:
+		result.Status = "error"
+		result.Error = "web interface did not expose recognizable printer metrics"
+	}
+}
+
+func discoverLinks(doc *html.Node, raw []byte, base *url.URL, address string) []*url.URL {
+	seen := make(map[string]bool)
+	var result []*url.URL
+	add := func(rawValue string) {
+		rawValue = strings.TrimSpace(rawValue)
+		if rawValue == "" || strings.HasPrefix(strings.ToLower(rawValue), "javascript:") || strings.HasPrefix(rawValue, "#") {
+			return
+		}
+		u, err := url.Parse(rawValue)
+		if err != nil {
+			return
+		}
+		u = base.ResolveReference(u)
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() != address || isStaticAsset(u.Path) || unsafePage(u.String()) {
+			return
+		}
+		u.Fragment = ""
+		key := canonicalURL(u)
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, u)
+		}
+	}
+	walkNodes(doc, func(n *html.Node) {
+		if n.Type != html.ElementNode || (n.Data != "a" && n.Data != "frame" && n.Data != "iframe") {
+			return
+		}
+		for _, attr := range n.Attr {
+			if attr.Key == "href" || attr.Key == "src" {
+				add(attr.Val)
+			}
+		}
+	})
+	for _, match := range rawLinkPattern.FindAllSubmatch(raw, -1) {
+		if len(match) == 2 {
+			add(string(match[1]))
+		}
+	}
+	return result
+}
+
+func linkScore(value string) int {
+	lower := strings.ToLower(value)
+	score := 1
+	if containsAny(lower, "counter", "count", "cnt", "счетчик", "счётчик") {
+		score += 100
+	}
+	if containsAny(lower, "toner", "supply", "consum", "status", "тонер", "расход") {
+		score += 80
+	}
+	if containsAny(lower, "device", "info", "устройств") {
+		score += 30
+	}
+	return score
+}
+
+func unsafePage(value string) bool {
+	lower := strings.ToLower(value)
+	return containsAny(lower, "logout", "logoff", "restart", "reboot", "shutdown", "delete", "firmware", "upload")
+}
+
+func isStaticAsset(path string) bool {
+	lower := strings.ToLower(path)
+	for _, suffix := range []string{".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf", ".pdf", ".zip"} {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func tableRows(table *html.Node) [][]string {
+	var rows [][]string
+	walkNodes(table, func(n *html.Node) {
+		if n.Type != html.ElementNode || n.Data != "tr" {
+			return
+		}
+		var cells []string
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			if child.Type == html.ElementNode && (child.Data == "td" || child.Data == "th") {
+				cells = append(cells, normalizeText(nodeText(child)))
+			}
+		}
+		if len(cells) > 0 {
+			rows = append(rows, cells)
+		}
+	})
+	return rows
+}
+
+func flattenRows(rows [][]string) []string {
+	var values []string
+	for _, row := range rows {
+		values = append(values, row...)
+	}
+	return values
+}
+
+func lastNumber(cells []string) (int64, bool) {
+	for i := len(cells) - 1; i >= 0; i-- {
+		matches := numberPattern.FindAllString(cells[i], -1)
+		for j := len(matches) - 1; j >= 0; j-- {
+			digits := strings.Map(func(r rune) rune {
+				if unicode.IsDigit(r) {
+					return r
+				}
+				return -1
+			}, matches[j])
+			if digits == "" {
+				continue
+			}
+			value, err := strconv.ParseInt(digits, 10, 64)
+			if err == nil {
+				return value, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func labelledNumber(text string, labels ...string) *int64 {
+	for _, label := range labels {
+		index := strings.LastIndex(text, label)
+		if index < 0 {
+			continue
+		}
+		if value, ok := lastNumber([]string{text[index+len(label):]}); ok {
+			return int64Pointer(value)
+		}
+	}
+	return nil
+}
+
+func firstKeyword(text string, values ...string) int {
+	best := -1
+	for _, value := range values {
+		if index := strings.Index(text, value); index >= 0 && (best < 0 || index < best) {
+			best = index
+		}
+	}
+	return best
+}
+
+func isLabel(value string, labels ...string) bool {
+	value = normalizeText(value)
+	for _, label := range labels {
+		if value == label || strings.HasPrefix(value, label+" ") || strings.HasPrefix(value, label+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func findElements(root *html.Node, tag string) []*html.Node {
+	var nodes []*html.Node
+	walkNodes(root, func(n *html.Node) {
+		if n.Type == html.ElementNode && n.Data == tag {
+			nodes = append(nodes, n)
+		}
+	})
+	return nodes
+}
+
+func walkNodes(root *html.Node, visit func(*html.Node)) {
+	if root == nil {
+		return
+	}
+	visit(root)
+	for child := root.FirstChild; child != nil; child = child.NextSibling {
+		walkNodes(child, visit)
+	}
+}
+
+func nodeText(root *html.Node) string {
+	var values []string
+	var walk func(*html.Node, bool)
+	walk = func(n *html.Node, ignored bool) {
+		if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style" || n.Data == "noscript") {
+			ignored = true
+		}
+		if n.Type == html.TextNode && !ignored {
+			values = append(values, n.Data)
+		}
+		for child := n.FirstChild; child != nil; child = child.NextSibling {
+			walk(child, ignored)
+		}
+	}
+	walk(root, false)
+	return strings.Join(values, " ")
+}
+
+func nodeTextWithAttributes(root *html.Node) string {
+	values := []string{nodeText(root)}
+	walkNodes(root, func(n *html.Node) {
+		for _, attr := range n.Attr {
+			if attr.Key == "alt" || attr.Key == "title" || attr.Key == "style" || attr.Key == "value" {
+				values = append(values, attr.Val)
+			}
+		}
+	})
+	return strings.Join(values, " ")
+}
+
+func documentTitle(doc *html.Node) string {
+	for _, title := range findElements(doc, "title") {
+		if value := normalizeText(nodeText(title)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeText(value string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(value, "\u00a0", " ")), " ")
+}
+
+func containsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneURL(value *url.URL) *url.URL {
+	copy := *value
+	return &copy
+}
+
+func canonicalURL(value *url.URL) string {
+	copy := cloneURL(value)
+	copy.Fragment = ""
+	return copy.String()
+}
+
+func pageMetricsEmpty(metrics *PageMetrics) bool {
+	return metrics.PrintedCopy == nil && metrics.PrintedPrinter == nil && metrics.PrintedFax == nil && metrics.PrintedTotal == nil &&
+		metrics.ScannedCopy == nil && metrics.ScannedOther == nil && metrics.ScannedFax == nil && metrics.ScannedTotal == nil
+}
+
+func hasEquivalentSupply(supplies []Supply, candidate Supply) bool {
+	for _, supply := range supplies {
+		if supply.Description == candidate.Description && supply.RemainingPercent != nil && candidate.RemainingPercent != nil && *supply.RemainingPercent == *candidate.RemainingPercent {
+			return true
+		}
+	}
+	return false
+}
+
+func int64Pointer(value int64) *int64       { return &value }
+func float64Pointer(value float64) *float64 { return &value }
+
+func webResultScore(result Result) int {
+	score := 0
+	if result.DetectedAsPrinter {
+		score++
+	}
+	if result.TotalPages != nil {
+		score += 10
+	}
+	if result.ConsumablePercent != nil {
+		score += 5
+	}
+	return score
+}

@@ -130,6 +130,9 @@ func (s SNMP) collectVersion(printer config.Printer, version gosnmp.SnmpVersion)
 	result.Supplies = parseSupplyPDUs(columns)
 	result.TonerPercent = lowestTonerPercent(result.Supplies)
 	applyVendorMetrics(&result)
+	if result.TotalPages != nil || len(result.Supplies) > 0 {
+		result.MetricSources = []string{"snmp"}
+	}
 
 	if s.DiagnosticOID != "" {
 		root := diagnosticRoot(s.DiagnosticOID, result.SystemObjectID)
