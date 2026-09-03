@@ -170,6 +170,11 @@ func parseSupplyPDUs(columns map[string][]gosnmp.SnmpPDU) []Supply {
 				percent = math.Max(0, math.Min(100, percent))
 				percent = math.Round(percent*10) / 10
 				s.RemainingPercent = &percent
+				if r.unit == 19 {
+					s.PercentSource = "reportedPercent"
+				} else {
+					s.PercentSource = "level/maxCapacity"
+				}
 			}
 		}
 		result = append(result, s)

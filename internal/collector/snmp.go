@@ -1,7 +1,9 @@
 package collector
 
 import (
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,9 +13,13 @@ import (
 )
 
 type SNMP struct {
-	Timeout time.Duration
-	Retries int
+	Timeout           time.Duration
+	Retries           int
+	DiagnosticOID     string
+	MaxDiagnosticOIDs int
 }
+
+var errDiagnosticLimit = errors.New("diagnostic OID limit reached")
 
 func (s SNMP) Collect(printer config.Printer) Result {
 	versions := []gosnmp.SnmpVersion{gosnmp.Version2c}
@@ -72,25 +78,21 @@ func (s SNMP) collectVersion(printer config.Printer, version gosnmp.SnmpVersion)
 	defer client.Conn.Close()
 
 	metadataOIDs := []string{OIDSysDescr, OIDSysObjectID, OIDSysName, OIDSysLocation}
-	packet, err := client.Get(metadataOIDs)
+	metadata, err := getMetadata(client, metadataOIDs)
 	if err != nil {
 		result.Error = "SNMP request failed: " + err.Error()
 		return result
 	}
-	if packet.Error != gosnmp.NoError {
-		result.Error = fmt.Sprintf("SNMP request failed: %s (index %d)", packet.Error, packet.ErrorIndex)
-		return result
-	}
-	if pdu, ok := pduByOID(packet.Variables, OIDSysDescr); ok {
+	if pdu, ok := pduByOID(metadata, OIDSysDescr); ok {
 		result.DeviceDescription = sanitizeText(pduString(pdu))
 	}
-	if pdu, ok := pduByOID(packet.Variables, OIDSysObjectID); ok {
+	if pdu, ok := pduByOID(metadata, OIDSysObjectID); ok {
 		result.SystemObjectID = sanitizeText(pduString(pdu))
 	}
-	if pdu, ok := pduByOID(packet.Variables, OIDSysName); ok {
+	if pdu, ok := pduByOID(metadata, OIDSysName); ok {
 		result.SystemName = sanitizeText(pduString(pdu))
 	}
-	if pdu, ok := pduByOID(packet.Variables, OIDSysLocation); ok && result.Location == "" {
+	if pdu, ok := pduByOID(metadata, OIDSysLocation); ok && result.Location == "" {
 		result.Location = sanitizeText(pduString(pdu))
 	}
 	if automaticName {
@@ -127,6 +129,26 @@ func (s SNMP) collectVersion(printer config.Printer, version gosnmp.SnmpVersion)
 	}
 	result.Supplies = parseSupplyPDUs(columns)
 	result.TonerPercent = lowestTonerPercent(result.Supplies)
+	applyVendorMetrics(&result)
+
+	if s.DiagnosticOID != "" {
+		root := diagnosticRoot(s.DiagnosticOID, result.SystemObjectID)
+		if root == "" {
+			errs = append(errs, "cannot determine enterprise OID from sysObjectID")
+		} else {
+			result.DiagnosticRoot = root
+			limit := s.MaxDiagnosticOIDs
+			if limit <= 0 {
+				limit = 500
+			}
+			pdus, cutOff, walkErr := walkLimited(client, root, limit)
+			result.DiagnosticCutOff = cutOff
+			result.DiagnosticOIDs = rawOIDs(pdus)
+			if walkErr != nil {
+				errs = append(errs, "diagnostic walk: "+walkErr.Error())
+			}
+		}
+	}
 
 	if len(result.Counters) > 0 || len(result.Supplies) > 0 {
 		result.DetectedAsPrinter = true
@@ -159,6 +181,85 @@ func (s SNMP) collectVersion(printer config.Printer, version gosnmp.SnmpVersion)
 		result.Error = "SNMP device responded, but it was not identified as a printer"
 	default:
 		result.Error = strings.Join(errs, "; ")
+	}
+	return result
+}
+
+func getMetadata(client *gosnmp.GoSNMP, oids []string) ([]gosnmp.SnmpPDU, error) {
+	packet, err := client.Get(oids)
+	if err == nil && packet.Error == gosnmp.NoError {
+		return packet.Variables, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("%s (index %d)", packet.Error, packet.ErrorIndex)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "invalid packet length") && client.Version != gosnmp.Version1 {
+		return nil, err
+	}
+
+	// Some older print servers generate malformed replies when several OIDs are
+	// requested together. Retrying one OID at a time keeps those devices usable.
+	var variables []gosnmp.SnmpPDU
+	var lastErr error
+	for _, oid := range oids {
+		response, getErr := client.Get([]string{oid})
+		if getErr != nil {
+			lastErr = getErr
+			continue
+		}
+		if response.Error != gosnmp.NoError {
+			lastErr = fmt.Errorf("%s (index %d)", response.Error, response.ErrorIndex)
+			continue
+		}
+		variables = append(variables, response.Variables...)
+	}
+	if len(variables) > 0 {
+		return variables, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, err
+}
+
+func diagnosticRoot(requested, systemObjectID string) string {
+	if requested != "auto" {
+		return requested
+	}
+	parts := strings.Split(strings.Trim(strings.TrimSpace(systemObjectID), "."), ".")
+	if len(parts) < 7 || strings.Join(parts[:6], ".") != "1.3.6.1.4.1" {
+		return ""
+	}
+	return ".1.3.6.1.4.1." + parts[6]
+}
+
+func walkLimited(client *gosnmp.GoSNMP, oid string, limit int) ([]gosnmp.SnmpPDU, bool, error) {
+	pdus := make([]gosnmp.SnmpPDU, 0, min(limit, 64))
+	walkFn := func(pdu gosnmp.SnmpPDU) error {
+		if len(pdus) >= limit {
+			return errDiagnosticLimit
+		}
+		if !isExceptionPDU(pdu) {
+			pdus = append(pdus, pdu)
+		}
+		return nil
+	}
+	var err error
+	if client.Version == gosnmp.Version1 {
+		err = client.Walk(oid, walkFn)
+	} else {
+		err = client.BulkWalk(oid, walkFn)
+	}
+	if errors.Is(err, errDiagnosticLimit) {
+		return pdus, true, nil
+	}
+	return pdus, false, err
+}
+
+func rawOIDs(pdus []gosnmp.SnmpPDU) []RawOID {
+	result := make([]RawOID, 0, len(pdus))
+	for _, pdu := range pdus {
+		result = append(result, RawOID{OID: pdu.Name, Type: strconv.Itoa(int(pdu.Type)), Value: sanitizeText(pduString(pdu))})
 	}
 	return result
 }

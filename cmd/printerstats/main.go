@@ -29,6 +29,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	version := flags.String("version", "auto", "SNMP version for -ip mode: auto, 1, or 2c")
 	timeout := flags.Duration("timeout", 3*time.Second, "SNMP timeout for -ip mode")
 	retries := flags.Int("retries", 1, "SNMP retries for -ip mode")
+	walkOID := flags.String("walk-oid", "", "include a diagnostic OID walk in -ip JSON output; use auto for the vendor enterprise tree")
 	format := flags.String("format", "table", "output format: table, json, or csv")
 	outputPath := flags.String("out", "", "write output to a file instead of stdout")
 	if err := flags.Parse(args); err != nil {
@@ -36,6 +37,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *format != "table" && *format != "json" && *format != "csv" {
 		fmt.Fprintf(stderr, "output error: unknown format %q; use table, json, or csv\n", *format)
+		return 2
+	}
+	if *walkOID != "" && (*directIP == "" || *format != "json") {
+		fmt.Fprintln(stderr, "configuration error: -walk-oid requires -ip and -format json")
 		return 2
 	}
 
@@ -77,7 +82,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	snmpCollector := collector.SNMP{Timeout: cfg.ParsedTimeout, Retries: *cfg.Retries}
+	snmpCollector := collector.SNMP{Timeout: cfg.ParsedTimeout, Retries: *cfg.Retries, DiagnosticOID: *walkOID, MaxDiagnosticOIDs: 500}
 	jobs := make(chan config.Printer)
 	results := make(chan collector.Result)
 	var workers sync.WaitGroup

@@ -3,9 +3,10 @@ package collector
 import "time"
 
 type Counter struct {
-	Index string `json:"index"`
-	Unit  string `json:"unit"`
-	Value int64  `json:"value"`
+	Index      string   `json:"index"`
+	Unit       string   `json:"unit"`
+	Value      int64    `json:"value"`
+	DistanceKM *float64 `json:"distance_km,omitempty"`
 }
 
 type Supply struct {
@@ -17,7 +18,14 @@ type Supply struct {
 	MaxCapacity      *int64   `json:"max_capacity,omitempty"`
 	Level            *int64   `json:"level,omitempty"`
 	RemainingPercent *float64 `json:"remaining_percent,omitempty"`
+	PercentSource    string   `json:"percent_source,omitempty"`
 	LevelState       string   `json:"level_state,omitempty"`
+}
+
+type RawOID struct {
+	OID   string `json:"oid"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
 }
 
 type Result struct {
@@ -36,8 +44,13 @@ type Result struct {
 	DeviceDescription string    `json:"device_description,omitempty"`
 	Status            string    `json:"status"`
 	TotalPages        *int64    `json:"total_pages,omitempty"`
+	PrintedLengthKM   *float64  `json:"printed_length_km,omitempty"`
 	TonerPercent      *float64  `json:"toner_percent,omitempty"`
+	ConsumablePercent *float64  `json:"consumable_percent,omitempty"`
 	Counters          []Counter `json:"counters,omitempty"`
 	Supplies          []Supply  `json:"supplies,omitempty"`
+	DiagnosticRoot    string    `json:"diagnostic_root,omitempty"`
+	DiagnosticOIDs    []RawOID  `json:"diagnostic_oids,omitempty"`
+	DiagnosticCutOff  bool      `json:"diagnostic_cut_off,omitempty"`
 	Error             string    `json:"error,omitempty"`
 }

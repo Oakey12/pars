@@ -29,14 +29,14 @@ func Write(w io.Writer, format string, results []collector.Result) error {
 
 func writeCSV(w io.Writer, results []collector.Result) error {
 	cw := csv.NewWriter(w)
-	if err := cw.Write([]string{"collected_at", "name", "address", "location", "inventory_number", "serial_number", "status", "detected_as_printer", "detection_method", "snmp_version", "tried_versions", "system_name", "system_object_id", "total_pages", "toner_percent", "supplies", "error"}); err != nil {
+	if err := cw.Write([]string{"collected_at", "name", "address", "location", "inventory_number", "serial_number", "status", "detected_as_printer", "detection_method", "snmp_version", "tried_versions", "system_name", "system_object_id", "total_pages", "printed_length_km", "toner_percent", "consumable_percent", "supplies", "error"}); err != nil {
 		return err
 	}
 	for _, result := range results {
 		if err := cw.Write([]string{
 			result.CollectedAt.Format("2006-01-02T15:04:05Z07:00"), result.Name, result.Address, result.Location,
 			result.InventoryNumber, result.SerialNumber, result.Status, strconv.FormatBool(result.DetectedAsPrinter), result.DetectionMethod, result.SNMPVersion, strings.Join(result.TriedVersions, ","),
-			result.SystemName, result.SystemObjectID, intText(result.TotalPages), percentText(result.TonerPercent), supplySummary(result.Supplies), result.Error,
+			result.SystemName, result.SystemObjectID, intText(result.TotalPages), floatText(result.PrintedLengthKM), percentText(result.TonerPercent), percentText(result.ConsumablePercent), supplySummary(result.Supplies), result.Error,
 		}); err != nil {
 			return err
 		}
@@ -47,11 +47,11 @@ func writeCSV(w io.Writer, results []collector.Result) error {
 
 func writeTable(w io.Writer, results []collector.Result) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "STATUS\tADDRESS\tPRINTER\tSNMP\tNAME\tPAGES\tTONER\tLOCATION"); err != nil {
+	if _, err := fmt.Fprintln(tw, "STATUS\tADDRESS\tPRINTER\tSNMP\tNAME\tPAGES\tLENGTH_KM\tSUPPLY%\tLOCATION"); err != nil {
 		return err
 	}
 	for _, result := range results {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", result.Status, result.Address, detectionText(result), attemptedVersions(result), result.Name, intText(result.TotalPages), percentText(result.TonerPercent), result.Location); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", result.Status, result.Address, detectionText(result), attemptedVersions(result), result.Name, intText(result.TotalPages), floatText(result.PrintedLengthKM), percentText(result.ConsumablePercent), result.Location); err != nil {
 			return err
 		}
 		if result.Error != "" {
@@ -92,6 +92,13 @@ func percentText(value *float64) string {
 		return ""
 	}
 	return strconv.FormatFloat(*value, 'f', 1, 64)
+}
+
+func floatText(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*value, 'f', 3, 64)
 }
 
 func supplySummary(supplies []collector.Supply) string {
