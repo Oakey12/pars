@@ -78,3 +78,48 @@ func TestWebDoesNotFollowAnotherHost(t *testing.T) {
 		t.Fatalf("followed a link to another host %d times", foreignHits)
 	}
 }
+
+func TestWebCollectsKyoceraJavaScriptEndpoints(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `<html><frameset><frame src="/startwlm/Start_Wlm.htm"></frameset></html>`)
+	})
+	mux.HandleFunc("/startwlm/Start_Wlm.htm", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `<html><body><script>document.write("Command Center RX")</script></body></html>`)
+	})
+	mux.HandleFunc("/dvcinfo/dvccounter/DvcInfo_Counter_PrnCounter.htm", func(w http.ResponseWriter, r *http.Request) {
+		if cookie, err := r.Cookie("rtl"); err != nil || cookie.Value != "0" {
+			http.Error(w, "cookie required", http.StatusForbidden)
+			return
+		}
+		fmt.Fprint(w, `counterBlackWhite[0] = 12604; counterBlackWhite[1] = 190990;`)
+	})
+	mux.HandleFunc("/dvcinfo/dvccounter/DvcInfo_Counter_ScanCounter.htm", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `counterBlackWhite[0] = 7110; counterBlackWhite[1] = 116358;`)
+	})
+	mux.HandleFunc("/startwlm/Hme_Toner.htm", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `tonerRemain[0] = 61;`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	host, _, _ := net.SplitHostPort(u.Host)
+
+	result := (Web{Timeout: time.Second}).Collect(config.Printer{Address: host, HTTPURL: server.URL + "/"})
+	if result.Status != "ok" {
+		t.Fatalf("status = %q, error = %q, warnings = %v", result.Status, result.Error, result.Warnings)
+	}
+	if result.TotalPages == nil || *result.TotalPages != 203594 {
+		t.Fatalf("printed total = %v", result.TotalPages)
+	}
+	if result.PageMetrics == nil || result.PageMetrics.ScannedTotal == nil || *result.PageMetrics.ScannedTotal != 123468 {
+		t.Fatalf("page metrics = %+v", result.PageMetrics)
+	}
+	if result.ConsumablePercent == nil || *result.ConsumablePercent != 61 {
+		t.Fatalf("toner = %v", result.ConsumablePercent)
+	}
+}

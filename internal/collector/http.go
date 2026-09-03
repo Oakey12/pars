@@ -1,11 +1,13 @@
 package collector
 
 import (
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"regexp"
 	"sort"
@@ -29,7 +31,18 @@ var (
 	numberPattern  = regexp.MustCompile(`[0-9][0-9\s.,\x{00a0}]*`)
 	percentPattern = regexp.MustCompile(`(?i)([0-9]{1,3}(?:[.,][0-9]+)?)\s*%`)
 	rawLinkPattern = regexp.MustCompile(`(?i)["']([^"'<>]{0,160}(?:counter|count|cnt|status|toner|supply|device|info|consum)[^"'<>]{0,100})["']`)
+	jsArrayPattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*["']?\s*([0-9]+)`)
+	jsValuePattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*(?:toner|remain|level|percent)[a-z0-9_$]*)\s*=\s*["']?\s*([0-9]{1,3})\s*%?`)
 )
+
+var kyoceraPublicPaths = []string{
+	"/dvcinfo/dvccounter/DvcInfo_Counter_PrnCounter.htm",
+	"/dvcinfo/dvccounter/DvcInfo_Counter_ScanCounter.htm",
+	"/js/jssrc/model/dvcinfo/dvccounter/DvcInfo_Counter_PrnCounter.model.htm",
+	"/js/jssrc/model/dvcinfo/dvccounter/DvcInfo_Counter_ScanCounter.model.htm",
+	"/startwlm/Hme_Toner.htm",
+	"/js/jssrc/model/startwlm/Hme_Toner.model.htm",
+}
 
 // Web reads public status pages exposed by a printer. It never submits forms
 // and follows links only on the configured printer IP.
@@ -129,9 +142,11 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // Local printers commonly use self-signed certificates.
+	jar, _ := cookiejar.New(nil)
 	client := &http.Client{
 		Timeout:   timeout,
 		Transport: transport,
+		Jar:       jar,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
@@ -142,8 +157,19 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 			return nil
 		},
 	}
+	client.Jar.SetCookies(start, []*http.Cookie{
+		{Name: "rtl", Value: "0", Path: "/"},
+		{Name: "css", Value: "1", Path: "/"},
+	})
 
-	queue := []crawlTarget{{URL: cloneURL(start), Score: 100}}
+	queue := []crawlTarget{{URL: cloneURL(start), Score: 1000}}
+	for index, path := range kyoceraPublicPaths {
+		known := cloneURL(start)
+		known.Path = path
+		known.RawQuery = ""
+		known.Fragment = ""
+		queue = append(queue, crawlTarget{URL: known, Score: 500 - index})
+	}
 	visited := make(map[string]bool)
 	var fetchErrors []string
 	for len(queue) > 0 && len(visited) < maxPages {
@@ -156,13 +182,14 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 		}
 		visited[key] = true
 
-		doc, raw, finalURL, err := fetchHTML(client, target.URL, maxBody)
+		doc, raw, finalURL, err := fetchHTML(client, target.URL, start.String(), maxBody)
 		if err != nil {
 			fetchErrors = append(fetchErrors, target.URL.String()+": "+err.Error())
 			continue
 		}
 		result.HTTPURL = finalURL.String()
 		parseWebPage(&result, doc)
+		parseKyoceraJavaScript(&result, string(raw), finalURL.Path)
 		if result.TotalPages != nil && result.ConsumablePercent != nil {
 			break
 		}
@@ -183,13 +210,14 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 	return result, nil
 }
 
-func fetchHTML(client *http.Client, target *url.URL, maxBody int64) (*html.Node, []byte, *url.URL, error) {
+func fetchHTML(client *http.Client, target *url.URL, referer string, maxBody int64) (*html.Node, []byte, *url.URL, error) {
 	req, err := http.NewRequest(http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, nil, target, err
 	}
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1")
 	req.Header.Set("User-Agent", "printerstats/1.0")
+	req.Header.Set("Referer", referer)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, target, err
@@ -205,12 +233,176 @@ func fetchHTML(client *http.Client, target *url.URL, maxBody int64) (*html.Node,
 	if int64(len(raw)) > maxBody {
 		return nil, nil, resp.Request.URL, fmt.Errorf("response exceeds %d bytes", maxBody)
 	}
-	utf8Reader, err := charset.NewReader(strings.NewReader(string(raw)), resp.Header.Get("Content-Type"))
+	utf8Reader, err := charset.NewReader(bytes.NewReader(raw), resp.Header.Get("Content-Type"))
 	if err != nil {
 		return nil, nil, resp.Request.URL, err
 	}
-	doc, err := html.Parse(utf8Reader)
-	return doc, raw, resp.Request.URL, err
+	decoded, err := io.ReadAll(io.LimitReader(utf8Reader, maxBody+1))
+	if err != nil {
+		return nil, nil, resp.Request.URL, err
+	}
+	if int64(len(decoded)) > maxBody {
+		return nil, nil, resp.Request.URL, fmt.Errorf("decoded response exceeds %d bytes", maxBody)
+	}
+	doc, err := html.Parse(bytes.NewReader(decoded))
+	return doc, decoded, resp.Request.URL, err
+}
+
+func parseKyoceraJavaScript(result *Result, source, path string) {
+	lowerPath := strings.ToLower(path)
+	arrays := javascriptArrays(source)
+	if strings.Contains(lowerPath, "prncounter") {
+		parseKyoceraPrintedArrays(result, arrays)
+	}
+	if strings.Contains(lowerPath, "scancounter") {
+		parseKyoceraScannedArrays(result, arrays)
+	}
+	if strings.Contains(lowerPath, "toner") && result.ConsumablePercent == nil {
+		parseKyoceraTonerJavaScript(result, source, arrays)
+	}
+}
+
+func javascriptArrays(source string) map[string]map[int]int64 {
+	arrays := make(map[string]map[int]int64)
+	for _, match := range jsArrayPattern.FindAllStringSubmatch(source, -1) {
+		index, indexErr := strconv.Atoi(match[2])
+		value, valueErr := strconv.ParseInt(match[3], 10, 64)
+		if indexErr != nil || valueErr != nil {
+			continue
+		}
+		name := strings.ToLower(match[1])
+		if arrays[name] == nil {
+			arrays[name] = make(map[int]int64)
+		}
+		arrays[name][index] = value
+	}
+	return arrays
+}
+
+func parseKyoceraPrintedArrays(result *Result, arrays map[string]map[int]int64) {
+	byFunction := make(map[int]int64)
+	matched := false
+	for name, values := range arrays {
+		if !isKyoceraPrintCounterArray(name) {
+			continue
+		}
+		matched = true
+		for index, value := range values {
+			byFunction[index] += value
+		}
+	}
+	if !matched {
+		return
+	}
+	metrics := ensurePageMetrics(result)
+	if value, ok := byFunction[0]; ok {
+		metrics.PrintedCopy = int64Pointer(value)
+	}
+	if value, ok := byFunction[1]; ok {
+		metrics.PrintedPrinter = int64Pointer(value)
+	}
+	if value, ok := byFunction[2]; ok {
+		metrics.PrintedFax = int64Pointer(value)
+	}
+	var total int64
+	for _, value := range byFunction {
+		total += value
+	}
+	metrics.PrintedTotal = int64Pointer(total)
+	result.TotalPages = metrics.PrintedTotal
+	markWebMetrics(result)
+}
+
+func isKyoceraPrintCounterArray(name string) bool {
+	if !strings.HasPrefix(name, "counter") || strings.Contains(name, "common") {
+		return false
+	}
+	return containsAny(name, "blackwhite", "fullcolor", "singlecolor", "onecolor", "twocolor", "threecolor")
+}
+
+func parseKyoceraScannedArrays(result *Result, arrays map[string]map[int]int64) {
+	byFunction := make(map[int]int64)
+	for name, values := range arrays {
+		if !strings.Contains(name, "counter") || strings.Contains(name, "common") {
+			continue
+		}
+		if !(strings.Contains(name, "scan") || strings.Contains(name, "original") || isKyoceraPrintCounterArray(name)) {
+			continue
+		}
+		for index, value := range values {
+			byFunction[index] += value
+		}
+	}
+	if len(byFunction) == 0 {
+		return
+	}
+	metrics := ensurePageMetrics(result)
+	if value, ok := byFunction[0]; ok {
+		metrics.ScannedCopy = int64Pointer(value)
+	}
+	if value, ok := byFunction[1]; ok {
+		metrics.ScannedOther = int64Pointer(value)
+	}
+	if value, ok := byFunction[2]; ok {
+		metrics.ScannedFax = int64Pointer(value)
+	}
+	var total int64
+	for _, value := range byFunction {
+		total += value
+	}
+	metrics.ScannedTotal = int64Pointer(total)
+	markWebMetrics(result)
+}
+
+func parseKyoceraTonerJavaScript(result *Result, source string, arrays map[string]map[int]int64) {
+	var levels []float64
+	for name, values := range arrays {
+		if !strings.Contains(name, "toner") && !strings.Contains(name, "remain") {
+			continue
+		}
+		for _, value := range values {
+			if value >= 0 && value <= 100 {
+				levels = append(levels, float64(value))
+			}
+		}
+	}
+	for _, match := range jsValuePattern.FindAllStringSubmatch(source, -1) {
+		value, err := strconv.ParseFloat(match[2], 64)
+		if err == nil && value >= 0 && value <= 100 && containsAny(strings.ToLower(match[1]), "remain", "level", "percent") {
+			levels = append(levels, value)
+		}
+	}
+	if len(levels) == 0 {
+		return
+	}
+	sort.Float64s(levels)
+	value := levels[0]
+	result.Supplies = append(result.Supplies, Supply{
+		Index:            "http.kyocera.toner",
+		Description:      "Toner",
+		Class:            "consumed",
+		Type:             "toner",
+		Unit:             "percent",
+		RemainingPercent: float64Pointer(value),
+		PercentSource:    "Kyocera web JavaScript",
+		LevelState:       "value",
+	})
+	result.TonerPercent = float64Pointer(value)
+	result.ConsumablePercent = float64Pointer(value)
+	markWebMetrics(result)
+}
+
+func ensurePageMetrics(result *Result) *PageMetrics {
+	if result.PageMetrics == nil {
+		result.PageMetrics = &PageMetrics{}
+	}
+	return result.PageMetrics
+}
+
+func markWebMetrics(result *Result) {
+	result.DetectedAsPrinter = true
+	result.DetectionMethod = "Kyocera Command Center RX"
+	result.MetricSources = uniqueStrings(append(result.MetricSources, "http"))
 }
 
 func parseWebPage(result *Result, doc *html.Node) {
