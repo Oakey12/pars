@@ -1,0 +1,48 @@
+{
+  "default_community": "public",
+  "timeout": "3s",
+  "retries": 1,
+  "concurrency": 8,
+  "printers": [
+    {"name":"Kyocera M2040dn — IT и Маркетинг","address":"192.168.140.30","location":"ОФИС МОСКВА","inventory_number":"00139","serial_number":"VCF8633490"},
+    {"name":"Kyocera M3040idn — Продажи","address":"192.168.140.31","location":"ОФИС МОСКВА","inventory_number":"00140","serial_number":"LSE7X17166"},
+    {"name":"Kyocera M3145dn — Бухгалтерия","address":"192.168.140.36","location":"ОФИС МОСКВА","inventory_number":"00506","serial_number":"R4Z0942169"},
+    {"name":"Kyocera M3145idn — Бухгалтерия","address":"192.168.140.33","location":"ОФИС МОСКВА","inventory_number":"00507","serial_number":"R4W1118714"},
+    {"name":"Kyocera M2640idw — HR","address":"192.168.140.32","location":"ОФИС МОСКВА","inventory_number":"00512","serial_number":"VCN1346774"},
+    {"name":"Kyocera M2640idw — Закупки","address":"192.168.140.34","location":"ОФИС МОСКВА","inventory_number":"00382","serial_number":"VCN7806442"},
+    {"name":"Samsung SCX-483xFD — Импорт","address":"192.168.140.35","location":"ОФИС МОСКВА","inventory_number":"00149","serial_number":"Z5P7BJED10002FK"},
+    {"name":"HP LaserJet 2055","address":"192.168.40.12","location":"ОФИС МОСКВА","enabled":false,"note":"Подключён к ПК, адрес относится к ПК, а не к принтеру"},
+
+    {"name":"Kyocera M3040dn — Зона отгрузки","address":"192.168.40.30","location":"СКЛАД ТРОИЦК","inventory_number":"00426","serial_number":"LS67Z46559"},
+    {"name":"Kyocera M3040dn — Офис","address":"192.168.40.31","location":"СКЛАД ТРОИЦК","inventory_number":"00576","serial_number":"LS66Z28903"},
+    {"name":"Kyocera P3045dn — Операторская","address":"192.168.40.35","location":"СКЛАД ТРОИЦК","inventory_number":"00573","serial_number":"VM49333813"},
+    {"name":"Kyocera P3055dn — Не подключён","address":"192.168.40.34","location":"СКЛАД ТРОИЦК","inventory_number":"00546","serial_number":"VLW7222269","enabled":false},
+    {"name":"Kyocera M3040idn — Мезонин 3 этаж","address":"192.168.40.38","location":"СКЛАД ТРОИЦК","inventory_number":"00141","serial_number":"LSE6108135"},
+    {"name":"Kyocera M3040dn — Резерв","address":"192.168.40.42","location":"СКЛАД ТРОИЦК","inventory_number":"00574","serial_number":"LS67940141"},
+    {"name":"TSC MH240 — Мезонин","address":"192.168.40.36","location":"СКЛАД ТРОИЦК","inventory_number":"00604","serial_number":"MH219290055","version":"auto"},
+    {"name":"TSC TTP2410MT — Мезонин","address":"192.168.40.32","location":"СКЛАД ТРОИЦК","inventory_number":"00605","serial_number":"20190509075","version":"auto"},
+    {"name":"TSC MH240 — Бирки","address":"192.168.40.37","location":"СКЛАД ТРОИЦК","inventory_number":"00606","serial_number":"MH219290024","version":"auto"},
+    {"name":"TSC MH240 — Зона отгрузки","address":"192.168.40.39","location":"СКЛАД ТРОИЦК","inventory_number":"00547","serial_number":"MH217480071","version":"auto"},
+    {"name":"TSC MH341 — Зона отгрузки","address":"192.168.40.33","location":"СКЛАД ТРОИЦК","inventory_number":"00548","serial_number":"MH322260110","version":"auto"},
+
+    {"name":"Kyocera M2035dn AP","address":"192.168.80.30","location":"ПРОИЗВОДСТВО"},
+    {"name":"Canon MF4700","address":"192.168.30.31","location":"ПРОИЗВОДСТВО"},
+
+    {"name":"Kyocera M2040dn","address":"192.168.50.30","location":"Офис Екатеринбург","serial_number":"VCF8312300"},
+    {"name":"Kyocera M2030dn — Старый, не подключён","address":"192.168.50.151","location":"Офис Екатеринбург","enabled":false},
+    {"name":"Kyocera P3155dn — Резерв","address":"192.168.50.33","location":"Офис Екатеринбург","serial_number":"R4B0561136"},
+    {"name":"Kyocera P2335dn — Склад","address":"192.168.50.31","location":"Офис Екатеринбург","serial_number":"R5J8708468"},
+
+    {"name":"Kyocera M2635dn","address":"192.168.60.30","location":"Офис Самара"},
+    {"name":"Kyocera 1060dn — USB","address":"192.168.60.31","location":"Офис Самара","enabled":false,"note":"В таблице указано, что принтер подключён к ПК по USB"},
+    {"name":"Kyocera 3145idn","address":"192.168.60.34","location":"Офис Самара"},
+    {"name":"Godex G300","address":"192.168.60.32","location":"Офис Самара","version":"auto"},
+    {"name":"Godex G330","address":"192.168.60.33","location":"Офис Самара","version":"auto"},
+
+    {"name":"Kyocera M2040dn","address":"192.168.70.30","location":"Новосибирск"},
+    {"name":"Kyocera ECOSYS P2335dn — Резерв","address":"192.168.70.34","location":"Новосибирск","serial_number":"office2"},
+    {"name":"Kyocera FS-1025MFP — Выведен из эксплуатации","address":"192.168.70.31","location":"Новосибирск","enabled":false},
+    {"name":"Kyocera ECOSYS P2335dn — Склад","address":"192.168.70.33","location":"Новосибирск","serial_number":"sklad 1"},
+    {"name":"Kyocera MA4500X","address":"192.168.70.35","location":"Новосибирск"}
+  ]
+}

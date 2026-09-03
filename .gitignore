@@ -1,0 +1,5 @@
+.codex-tmp/
+/printerstats.exe
+/printerstats
+results*.json
+results*.csv
