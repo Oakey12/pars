@@ -66,8 +66,11 @@ func mergeResults(snmpResult, webResult Result) Result {
 		result.Warnings = append(result.Warnings, webResult.Warnings...)
 		result.Error = ""
 		switch {
-		case result.TotalPages != nil && result.ConsumablePercent != nil:
+		case result.TotalPages != nil:
 			result.Status = "ok"
+			if result.ConsumablePercent == nil {
+				result.Warnings = append(result.Warnings, "toner level was not found on public interfaces")
+			}
 		default:
 			result.Status = "partial"
 		}

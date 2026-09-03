@@ -40,7 +40,7 @@
     {"name":"Godex G330","address":"192.168.60.33","location":"Офис Самара","version":"auto"},
 
     {"name":"Kyocera M2040dn","address":"192.168.70.30","location":"Новосибирск"},
-    {"name":"Kyocera ECOSYS P2335dn — Резерв","address":"192.168.70.34","location":"Новосибирск","serial_number":"office2"},
+    {"name":"Kyocera ECOSYS P2335dn — Резерв","address":"192.168.70.34","location":"Новосибирск","serial_number":"office2","protocol":"http"},
     {"name":"Kyocera FS-1025MFP — Выведен из эксплуатации","address":"192.168.70.31","location":"Новосибирск","enabled":false},
     {"name":"Kyocera ECOSYS P2335dn — Склад","address":"192.168.70.33","location":"Новосибирск","serial_number":"sklad 1"},
     {"name":"Kyocera MA4500X","address":"192.168.70.35","location":"Новосибирск"}

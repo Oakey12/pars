@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/xuri/excelize/v2"
@@ -19,25 +20,8 @@ var excelHeaders = []string{
 	"Статус",
 	"IP-адрес",
 	"Название",
-	"Описание устройства",
-	"Расположение",
-	"Инвентарный номер",
-	"Серийный номер",
-	"Принтер определён",
-	"Источник",
-	"SNMP",
 	"Всего напечатано",
-	"Печать",
-	"Копирование",
-	"Факс",
 	"Всего отсканировано",
-	"Сканирование: копии",
-	"Сканирование: другое",
-	"Длина печати, км",
-	"Остаток, %",
-	"Метод определения",
-	"HTTP-страница",
-	"Ошибка / предупреждения",
 }
 
 // AppendExcel adds one history row per result. Existing rows are never
@@ -71,6 +55,10 @@ func AppendExcel(path string, results []collector.Result) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("read Excel history: %w", err)
 	}
+	rows, err = migrateLegacyExcelHistory(book, rows)
+	if err != nil {
+		return 0, err
+	}
 	if err := validateExcelHeaders(rows); err != nil {
 		return 0, err
 	}
@@ -100,6 +88,71 @@ func AppendExcel(path string, results []collector.Result) (int, error) {
 		return 0, fmt.Errorf("append Excel history (close the file in Excel and retry): %w", err)
 	}
 	return len(results), nil
+}
+
+func migrateLegacyExcelHistory(book *excelize.File, rows [][]string) ([][]string, error) {
+	if len(rows) == 0 || len(rows[0]) < 16 {
+		return rows, nil
+	}
+	legacy := rows[0][0] == "Дата и время" && rows[0][1] == "Статус" &&
+		rows[0][2] == "IP-адрес" && rows[0][3] == "Название" &&
+		rows[0][11] == "Всего напечатано" && rows[0][15] == "Всего отсканировано"
+	if !legacy {
+		return rows, nil
+	}
+
+	converted := make([][]string, len(rows))
+	converted[0] = append([]string(nil), excelHeaders...)
+	for rowIndex := 1; rowIndex < len(rows); rowIndex++ {
+		converted[rowIndex] = []string{
+			rowCell(rows[rowIndex], 0), rowCell(rows[rowIndex], 1),
+			rowCell(rows[rowIndex], 2), rowCell(rows[rowIndex], 3),
+			rowCell(rows[rowIndex], 11), rowCell(rows[rowIndex], 15),
+		}
+	}
+	header := make([]interface{}, len(excelHeaders))
+	for columnIndex, value := range excelHeaders {
+		header[columnIndex] = value
+	}
+	if err := book.SetSheetRow(excelHistorySheet, "A1", &header); err != nil {
+		return nil, fmt.Errorf("convert old Excel history header: %w", err)
+	}
+	for rowNumber := 2; rowNumber <= len(rows); rowNumber++ {
+		if err := copyLegacyCounter(book, fmt.Sprintf("L%d", rowNumber), fmt.Sprintf("E%d", rowNumber)); err != nil {
+			return nil, fmt.Errorf("preserve printed counter from old Excel row %d: %w", rowNumber, err)
+		}
+		if err := copyLegacyCounter(book, fmt.Sprintf("P%d", rowNumber), fmt.Sprintf("F%d", rowNumber)); err != nil {
+			return nil, fmt.Errorf("preserve scanned counter from old Excel row %d: %w", rowNumber, err)
+		}
+	}
+	for column := 0; column < 17; column++ {
+		if err := book.RemoveCol(excelHistorySheet, "G"); err != nil {
+			return nil, fmt.Errorf("remove old Excel columns: %w", err)
+		}
+	}
+	return converted, nil
+}
+
+func copyLegacyCounter(book *excelize.File, source, destination string) error {
+	raw, err := book.GetCellValue(excelHistorySheet, source, excelize.Options{RawCellValue: true})
+	if err != nil {
+		return err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return book.SetCellValue(excelHistorySheet, destination, nil)
+	}
+	if value, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil {
+		return book.SetCellInt(excelHistorySheet, destination, value)
+	}
+	return book.SetCellStr(excelHistorySheet, destination, raw)
+}
+
+func rowCell(row []string, index int) string {
+	if index >= len(row) {
+		return ""
+	}
+	return row[index]
 }
 
 func openExcelHistory(path string) (*excelize.File, bool, error) {
@@ -157,8 +210,6 @@ type excelStyles struct {
 	row     int
 	date    int
 	integer int
-	decimal int
-	percent int
 	ok      int
 	partial int
 	failure int
@@ -189,16 +240,6 @@ func createExcelStyles(book *excelize.File) (excelStyles, error) {
 	if err != nil {
 		return excelStyles{}, err
 	}
-	decimalFormat := "#,##0.000"
-	decimal, err := book.NewStyle(&excelize.Style{CustomNumFmt: &decimalFormat, Alignment: &excelize.Alignment{Horizontal: "right", Vertical: "center"}, Border: border})
-	if err != nil {
-		return excelStyles{}, err
-	}
-	percentFormat := "0.0%"
-	percent, err := book.NewStyle(&excelize.Style{CustomNumFmt: &percentFormat, Alignment: &excelize.Alignment{Horizontal: "right", Vertical: "center"}, Border: border})
-	if err != nil {
-		return excelStyles{}, err
-	}
 	statusStyle := func(fill, font string) (int, error) {
 		return book.NewStyle(&excelize.Style{
 			Font:      &excelize.Font{Bold: true, Color: font, Family: "Aptos", Size: 10},
@@ -219,7 +260,7 @@ func createExcelStyles(book *excelize.File) (excelStyles, error) {
 	if err != nil {
 		return excelStyles{}, err
 	}
-	return excelStyles{header: header, row: row, date: date, integer: integer, decimal: decimal, percent: percent, ok: ok, partial: partial, failure: failure}, nil
+	return excelStyles{header: header, row: row, date: date, integer: integer, ok: ok, partial: partial, failure: failure}, nil
 }
 
 func writeExcelResult(book *excelize.File, rowNumber int, result collector.Result, styles excelStyles) error {
@@ -228,43 +269,20 @@ func writeExcelResult(book *excelize.File, rowNumber int, result collector.Resul
 		result.Status,
 		result.Address,
 		result.Name,
-		result.DeviceDescription,
-		result.Location,
-		result.InventoryNumber,
-		result.SerialNumber,
-		yesNo(result.DetectedAsPrinter),
-		strings.Join(result.MetricSources, "+"),
-		attemptedVersions(result),
 		pointerValue(result.TotalPages),
-		pageMetricValue(result.PageMetrics, func(metrics *collector.PageMetrics) *int64 { return metrics.PrintedPrinter }),
-		pageMetricValue(result.PageMetrics, func(metrics *collector.PageMetrics) *int64 { return metrics.PrintedCopy }),
-		pageMetricValue(result.PageMetrics, func(metrics *collector.PageMetrics) *int64 { return metrics.PrintedFax }),
 		pageMetricValue(result.PageMetrics, func(metrics *collector.PageMetrics) *int64 { return metrics.ScannedTotal }),
-		pageMetricValue(result.PageMetrics, func(metrics *collector.PageMetrics) *int64 { return metrics.ScannedCopy }),
-		pageMetricValue(result.PageMetrics, func(metrics *collector.PageMetrics) *int64 { return metrics.ScannedOther }),
-		floatPointerValue(result.PrintedLengthKM),
-		percentValue(result.ConsumablePercent),
-		result.DetectionMethod,
-		result.HTTPURL,
-		resultDetails(result),
 	}
 	cell, _ := excelize.CoordinatesToCellName(1, rowNumber)
 	if err := book.SetSheetRow(excelHistorySheet, cell, &row); err != nil {
 		return fmt.Errorf("write Excel row %d: %w", rowNumber, err)
 	}
-	if err := book.SetCellStyle(excelHistorySheet, cell, fmt.Sprintf("W%d", rowNumber), styles.row); err != nil {
+	if err := book.SetCellStyle(excelHistorySheet, cell, fmt.Sprintf("F%d", rowNumber), styles.row); err != nil {
 		return err
 	}
 	if err := book.SetCellStyle(excelHistorySheet, fmt.Sprintf("A%d", rowNumber), fmt.Sprintf("A%d", rowNumber), styles.date); err != nil {
 		return err
 	}
-	if err := book.SetCellStyle(excelHistorySheet, fmt.Sprintf("L%d", rowNumber), fmt.Sprintf("R%d", rowNumber), styles.integer); err != nil {
-		return err
-	}
-	if err := book.SetCellStyle(excelHistorySheet, fmt.Sprintf("S%d", rowNumber), fmt.Sprintf("S%d", rowNumber), styles.decimal); err != nil {
-		return err
-	}
-	if err := book.SetCellStyle(excelHistorySheet, fmt.Sprintf("T%d", rowNumber), fmt.Sprintf("T%d", rowNumber), styles.percent); err != nil {
+	if err := book.SetCellStyle(excelHistorySheet, fmt.Sprintf("E%d", rowNumber), fmt.Sprintf("F%d", rowNumber), styles.integer); err != nil {
 		return err
 	}
 	statusStyle := styles.failure
@@ -280,16 +298,19 @@ func writeExcelResult(book *excelize.File, rowNumber int, result collector.Resul
 }
 
 func formatExcelHistory(book *excelize.File, lastRow int, styles excelStyles) error {
-	if err := book.SetCellStyle(excelHistorySheet, "A1", "W1", styles.header); err != nil {
+	if err := book.SetCellStyle(excelHistorySheet, "A1", "F1", styles.header); err != nil {
 		return err
 	}
 	if err := book.SetRowHeight(excelHistorySheet, 1, 34); err != nil {
 		return err
 	}
+	if lastRow >= 2 {
+		if err := book.SetCellStyle(excelHistorySheet, "E2", fmt.Sprintf("F%d", lastRow), styles.integer); err != nil {
+			return err
+		}
+	}
 	widths := map[string]float64{
-		"A": 20, "B": 12, "C": 16, "D": 34, "E": 36, "F": 24, "G": 18, "H": 20,
-		"I": 17, "J": 12, "K": 10, "L": 18, "M": 15, "N": 15, "O": 12, "P": 20,
-		"Q": 22, "R": 22, "S": 18, "T": 14, "U": 28, "V": 45, "W": 55,
+		"A": 20, "B": 12, "C": 16, "D": 34, "E": 20, "F": 22,
 	}
 	for column, width := range widths {
 		if err := book.SetColWidth(excelHistorySheet, column, column, width); err != nil {
@@ -299,7 +320,7 @@ func formatExcelHistory(book *excelize.File, lastRow int, styles excelStyles) er
 	if err := book.SetPanes(excelHistorySheet, &excelize.Panes{Freeze: true, YSplit: 1, TopLeftCell: "A2", ActivePane: "bottomLeft"}); err != nil {
 		return err
 	}
-	if err := book.AutoFilter(excelHistorySheet, fmt.Sprintf("A1:W%d", max(lastRow, 1)), []excelize.AutoFilterOptions{}); err != nil {
+	if err := book.AutoFilter(excelHistorySheet, fmt.Sprintf("A1:F%d", max(lastRow, 1)), []excelize.AutoFilterOptions{}); err != nil {
 		return err
 	}
 	book.SetActiveSheet(mustSheetIndex(book, excelHistorySheet))
@@ -318,38 +339,9 @@ func pointerValue(value *int64) interface{} {
 	return *value
 }
 
-func floatPointerValue(value *float64) interface{} {
-	if value == nil {
-		return nil
-	}
-	return *value
-}
-
-func percentValue(value *float64) interface{} {
-	if value == nil {
-		return nil
-	}
-	return *value / 100
-}
-
 func pageMetricValue(metrics *collector.PageMetrics, selectValue func(*collector.PageMetrics) *int64) interface{} {
 	if metrics == nil {
 		return nil
 	}
 	return pointerValue(selectValue(metrics))
-}
-
-func resultDetails(result collector.Result) string {
-	parts := append([]string(nil), result.Warnings...)
-	if result.Error != "" {
-		parts = append(parts, result.Error)
-	}
-	return strings.Join(parts, " | ")
-}
-
-func yesNo(value bool) string {
-	if value {
-		return "Да"
-	}
-	return "Нет"
 }

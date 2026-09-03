@@ -153,6 +153,29 @@ func TestGenericKyoceraCounterAndTonerVariables(t *testing.T) {
 	}
 }
 
+func TestKyoceraCounterFallbackForAnonymousFirmwareValues(t *testing.T) {
+	result := Result{}
+	source := `<html><body data-model="P2335dn"><script>
+		var rows = [["Общий", "106297"]];
+		var refreshed = "2026-09-03 18:13:12";
+	</script></body></html>`
+	parseKyoceraJavaScript(&result, source, "/dvcinfo/dvccounter/DvcInfo_Counter_PrnCounter.model.htm")
+	if result.TotalPages == nil || *result.TotalPages != 106297 {
+		t.Fatalf("printed total = %v", result.TotalPages)
+	}
+}
+
+func TestMergeTreatsPrintedCounterAsSuccessfulWithoutToner(t *testing.T) {
+	pages := int64(106297)
+	result := mergeResults(
+		Result{Status: "error", Error: "SNMP request timeout"},
+		Result{Status: "ok", TotalPages: &pages, MetricSources: []string{"http"}},
+	)
+	if result.Status != "ok" || result.TotalPages == nil || *result.TotalPages != 106297 {
+		t.Fatalf("merged result = %+v", result)
+	}
+}
+
 func TestLikelyCounterTotalAvoidsDoubleCountingDisplayedTotal(t *testing.T) {
 	if got := likelyCounterTotal([]int64{12604, 190990, 203594}); got != 203594 {
 		t.Fatalf("total = %d", got)

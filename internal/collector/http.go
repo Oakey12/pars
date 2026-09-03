@@ -299,6 +299,11 @@ func parseKyoceraJavaScript(result *Result, source, path string) {
 func parseGenericKyoceraCounter(result *Result, source string, arrays map[string]map[int]int64, scanned bool) {
 	values := genericCounterValues(source, arrays)
 	if len(values) == 0 {
+		if fallback := largestKyoceraCounterCandidate(source); fallback != nil {
+			values = []int64{*fallback}
+		}
+	}
+	if len(values) == 0 {
 		return
 	}
 	total := likelyCounterTotal(values)
@@ -316,6 +321,33 @@ func parseGenericKyoceraCounter(result *Result, source string, arrays map[string
 		}
 	}
 	markWebMetrics(result)
+}
+
+// Some Command Center RX firmware renders counter values from anonymous arrays
+// or input values whose field names do not contain "counter". This fallback is
+// used only on known Kyocera counter pages and takes the largest plausible
+// document counter, ignoring ordinary UI dimensions, dates and model numbers.
+func largestKyoceraCounterCandidate(source string) *int64 {
+	var largest int64
+	for _, match := range numberPattern.FindAllStringIndex(source, -1) {
+		value, err := strconv.ParseInt(onlyDigits(source[match[0]:match[1]]), 10, 64)
+		if err != nil || value < 10000 || value > 100000000 {
+			continue
+		}
+		contextStart := max(0, match[0]-48)
+		contextEnd := min(len(source), match[1]+48)
+		context := strings.ToLower(source[contextStart:contextEnd])
+		if containsAny(context, "width", "height", "padding", "margin", "timeout", "timestamp", "epoch", "version") {
+			continue
+		}
+		if value > largest {
+			largest = value
+		}
+	}
+	if largest == 0 {
+		return nil
+	}
+	return int64Pointer(largest)
 }
 
 func genericCounterValues(source string, arrays map[string]map[int]int64) []int64 {
