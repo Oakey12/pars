@@ -31,7 +31,7 @@ var (
 	numberPattern  = regexp.MustCompile(`[0-9][0-9\s.,\x{00a0}]*`)
 	percentPattern = regexp.MustCompile(`(?i)([0-9]{1,3}(?:[.,][0-9]+)?)\s*%`)
 	rawLinkPattern = regexp.MustCompile(`(?i)["']([^"'<>]{0,160}(?:counter|count|cnt|status|toner|supply|device|info|consum)[^"'<>]{0,100})["']`)
-	jsArrayPattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*["']?\s*([0-9]+)`)
+	jsArrayPattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*(?:parseInt\s*\(\s*)?["']?\s*([0-9][0-9\s.,]*)`)
 	jsValuePattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*(?:toner|remain|level|percent)[a-z0-9_$]*)\s*=\s*["']?\s*([0-9]{1,3})\s*%?`)
 )
 
@@ -77,6 +77,11 @@ func (w Web) Collect(printer config.Printer) Result {
 			best = current
 		}
 		if current.TotalPages != nil && current.ConsumablePercent != nil {
+			return current
+		}
+		// If this scheme reached the printer web UI, switching from HTTP to
+		// HTTPS (or vice versa) only repeats slow requests against the same UI.
+		if current.DetectedAsPrinter && current.HTTPURL != "" {
 			return current
 		}
 	}
@@ -163,15 +168,10 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 	})
 
 	queue := []crawlTarget{{URL: cloneURL(start), Score: 1000}}
-	for index, path := range kyoceraPublicPaths {
-		known := cloneURL(start)
-		known.Path = path
-		known.RawQuery = ""
-		known.Fragment = ""
-		queue = append(queue, crawlTarget{URL: known, Score: 500 - index})
-	}
 	visited := make(map[string]bool)
 	var fetchErrors []string
+	kyoceraPathsAdded := false
+	counterPagesFetched := 0
 	for len(queue) > 0 && len(visited) < maxPages {
 		sort.SliceStable(queue, func(i, j int) bool { return queue[i].Score > queue[j].Score })
 		target := queue[0]
@@ -190,6 +190,21 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 		result.HTTPURL = finalURL.String()
 		parseWebPage(&result, doc)
 		parseKyoceraJavaScript(&result, string(raw), finalURL.Path)
+		if strings.Contains(strings.ToLower(finalURL.Path), "counter") {
+			counterPagesFetched++
+		}
+		if !kyoceraPathsAdded && isKyoceraWebPage(doc, raw) {
+			kyoceraPathsAdded = true
+			result.DetectedAsPrinter = true
+			result.DetectionMethod = "Kyocera Command Center RX"
+			for index, path := range kyoceraPublicPaths {
+				known := cloneURL(start)
+				known.Path = path
+				known.RawQuery = ""
+				known.Fragment = ""
+				queue = append(queue, crawlTarget{URL: known, Score: 500 - index})
+			}
+		}
 		if result.TotalPages != nil && result.ConsumablePercent != nil {
 			break
 		}
@@ -204,8 +219,19 @@ func (w Web) crawl(printer config.Printer, start *url.URL) (Result, error) {
 	}
 
 	finishWebResult(&result)
+	if result.DetectedAsPrinter && result.TotalPages == nil && result.ConsumablePercent == nil {
+		result.Warnings = nil
+		switch {
+		case counterPagesFetched > 0:
+			result.Warnings = []string{"Kyocera counter page is reachable, but its data format was not recognized"}
+		case len(fetchErrors) > 0:
+			result.Warnings = []string{"Kyocera metric pages are unavailable: " + summarizeHTTPFailures(fetchErrors)}
+		default:
+			result.Warnings = []string{"printer web interface is reachable, but counter and toner pages were not found"}
+		}
+	}
 	if len(visited) == 0 || (result.Status == "error" && len(fetchErrors) > 0) {
-		return result, errors.New(strings.Join(fetchErrors, "; "))
+		return result, errors.New(summarizeHTTPFailures(fetchErrors))
 	}
 	return result, nil
 }
@@ -251,7 +277,7 @@ func fetchHTML(client *http.Client, target *url.URL, referer string, maxBody int
 func parseKyoceraJavaScript(result *Result, source, path string) {
 	lowerPath := strings.ToLower(path)
 	arrays := javascriptArrays(source)
-	if strings.Contains(lowerPath, "prncounter") {
+	if strings.Contains(lowerPath, "prncounter") || (strings.Contains(lowerPath, "counter") && !strings.Contains(lowerPath, "scan")) {
 		parseKyoceraPrintedArrays(result, arrays)
 	}
 	if strings.Contains(lowerPath, "scancounter") {
@@ -266,7 +292,7 @@ func javascriptArrays(source string) map[string]map[int]int64 {
 	arrays := make(map[string]map[int]int64)
 	for _, match := range jsArrayPattern.FindAllStringSubmatch(source, -1) {
 		index, indexErr := strconv.Atoi(match[2])
-		value, valueErr := strconv.ParseInt(match[3], 10, 64)
+		value, valueErr := strconv.ParseInt(onlyDigits(match[3]), 10, 64)
 		if indexErr != nil || valueErr != nil {
 			continue
 		}
@@ -314,7 +340,7 @@ func parseKyoceraPrintedArrays(result *Result, arrays map[string]map[int]int64) 
 }
 
 func isKyoceraPrintCounterArray(name string) bool {
-	if !strings.HasPrefix(name, "counter") || strings.Contains(name, "common") {
+	if (!strings.HasPrefix(name, "counter") && !strings.HasPrefix(name, "cntr")) || strings.Contains(name, "common") {
 		return false
 	}
 	return containsAny(name, "blackwhite", "fullcolor", "singlecolor", "onecolor", "twocolor", "threecolor")
@@ -323,7 +349,7 @@ func isKyoceraPrintCounterArray(name string) bool {
 func parseKyoceraScannedArrays(result *Result, arrays map[string]map[int]int64) {
 	byFunction := make(map[int]int64)
 	for name, values := range arrays {
-		if !strings.Contains(name, "counter") || strings.Contains(name, "common") {
+		if (!strings.Contains(name, "counter") && !strings.Contains(name, "cntr")) || strings.Contains(name, "common") {
 			continue
 		}
 		if !(strings.Contains(name, "scan") || strings.Contains(name, "original") || isKyoceraPrintCounterArray(name)) {
@@ -357,7 +383,7 @@ func parseKyoceraScannedArrays(result *Result, arrays map[string]map[int]int64) 
 func parseKyoceraTonerJavaScript(result *Result, source string, arrays map[string]map[int]int64) {
 	var levels []float64
 	for name, values := range arrays {
-		if !strings.Contains(name, "toner") && !strings.Contains(name, "remain") {
+		if !containsAny(name, "remain", "level", "percent") {
 			continue
 		}
 		for _, value := range values {
@@ -545,7 +571,7 @@ func finishWebResult(result *Result) {
 	case hasPages && hasSupply:
 		result.Status = "ok"
 	case hasPages:
-		result.Status = "partial"
+		result.Status = "ok"
 		result.Warnings = append(result.Warnings, "toner level was not found on public web pages")
 	case hasSupply:
 		result.Status = "partial"
@@ -583,7 +609,7 @@ func discoverLinks(doc *html.Node, raw []byte, base *url.URL, address string) []
 		}
 	}
 	walkNodes(doc, func(n *html.Node) {
-		if n.Type != html.ElementNode || (n.Data != "a" && n.Data != "frame" && n.Data != "iframe") {
+		if n.Type != html.ElementNode || (n.Data != "a" && n.Data != "frame" && n.Data != "iframe" && n.Data != "script") {
 			return
 		}
 		for _, attr := range n.Attr {
@@ -622,12 +648,58 @@ func unsafePage(value string) bool {
 
 func isStaticAsset(path string) bool {
 	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".js") && containsAny(lower, "counter", "toner", "model", "supply", "consum") {
+		return false
+	}
 	for _, suffix := range []string{".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf", ".pdf", ".zip"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}
 	}
 	return false
+}
+
+func isKyoceraWebPage(doc *html.Node, raw []byte) bool {
+	value := strings.ToLower(nodeText(doc) + " " + string(raw))
+	return containsAny(value, "command center rx", "kyocera", "startwlm", "dvccounter")
+}
+
+func summarizeHTTPFailures(failures []string) string {
+	if len(failures) == 0 {
+		return "no HTTP response"
+	}
+	counts := map[string]int{"timeout": 0, "not found": 0, "unauthorized": 0, "refused": 0, "other": 0}
+	for _, failure := range failures {
+		lower := strings.ToLower(failure)
+		switch {
+		case containsAny(lower, "timeout", "deadline exceeded"):
+			counts["timeout"]++
+		case strings.Contains(lower, "404"):
+			counts["not found"]++
+		case strings.Contains(lower, "401"):
+			counts["unauthorized"]++
+		case strings.Contains(lower, "refused"):
+			counts["refused"]++
+		default:
+			counts["other"]++
+		}
+	}
+	var parts []string
+	for _, key := range []string{"timeout", "not found", "unauthorized", "refused", "other"} {
+		if counts[key] > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func onlyDigits(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsDigit(r) {
+			return r
+		}
+		return -1
+	}, value)
 }
 
 func tableRows(table *html.Node) [][]string {

@@ -96,7 +96,10 @@ func TestWebCollectsKyoceraJavaScriptEndpoints(t *testing.T) {
 			http.Error(w, "cookie required", http.StatusForbidden)
 			return
 		}
-		fmt.Fprint(w, `counterBlackWhite[0] = 12604; counterBlackWhite[1] = 190990;`)
+		fmt.Fprint(w, `<html><script src="/custom/model_counter.js"></script></html>`)
+	})
+	mux.HandleFunc("/custom/model_counter.js", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `counterBlackWhite[0] = "12,604"; counterBlackWhite[1] = 190990;`)
 	})
 	mux.HandleFunc("/dvcinfo/dvccounter/DvcInfo_Counter_ScanCounter.htm", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `counterBlackWhite[0] = 7110; counterBlackWhite[1] = 116358;`)
@@ -121,5 +124,16 @@ func TestWebCollectsKyoceraJavaScriptEndpoints(t *testing.T) {
 	}
 	if result.ConsumablePercent == nil || *result.ConsumablePercent != 61 {
 		t.Fatalf("toner = %v", result.ConsumablePercent)
+	}
+}
+
+func TestSummarizeHTTPFailures(t *testing.T) {
+	got := summarizeHTTPFailures([]string{
+		`http://192.0.2.1/: context deadline exceeded`,
+		`http://192.0.2.1/counter: context deadline exceeded`,
+		`http://192.0.2.1/toner: HTTP 404 Not Found`,
+	})
+	if got != "timeout=2, not found=1" {
+		t.Fatalf("summary = %q", got)
 	}
 }

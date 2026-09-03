@@ -47,17 +47,17 @@ func writeCSV(w io.Writer, results []collector.Result) error {
 
 func writeTable(w io.Writer, results []collector.Result) error {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "STATUS\tADDRESS\tDETECTED\tSOURCE\tSNMP\tNAME\tPRINTED\tPRINT\tCOPY\tSCANNED\tTONER%\tLOCATION"); err != nil {
+	if _, err := fmt.Fprintln(tw, "STATUS\tADDRESS\tDETECTED\tSOURCE\tSNMP\tNAME\tPRINTED\tPRINT\tCOPY\tSCANNED\tLENGTH_KM\tTONER%\tLOCATION"); err != nil {
 		return err
 	}
 	for _, result := range results {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			result.Status, result.Address, detectionText(result), strings.Join(result.MetricSources, "+"), attemptedVersions(result), result.Name,
 			intText(result.TotalPages),
 			pageMetricText(result, func(m *collector.PageMetrics) *int64 { return m.PrintedPrinter }),
 			pageMetricText(result, func(m *collector.PageMetrics) *int64 { return m.PrintedCopy }),
 			pageMetricText(result, func(m *collector.PageMetrics) *int64 { return m.ScannedTotal }),
-			percentText(result.ConsumablePercent), result.Location); err != nil {
+			floatText(result.PrintedLengthKM), percentText(result.ConsumablePercent), result.Location); err != nil {
 			return err
 		}
 		if result.Error != "" {

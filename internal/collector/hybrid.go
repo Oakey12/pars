@@ -75,10 +75,18 @@ func mergeResults(snmpResult, webResult Result) Result {
 	}
 
 	if webResult.Error != "" {
-		result.Warnings = append(result.Warnings, "HTTP: "+webResult.Error)
+		if !hasUsefulMetrics(snmpResult) {
+			result.Warnings = append(result.Warnings, "HTTP: "+webResult.Error)
+		}
 	}
-	result.Warnings = append(result.Warnings, webResult.Warnings...)
+	if !hasUsefulMetrics(snmpResult) {
+		result.Warnings = append(result.Warnings, webResult.Warnings...)
+	}
 	return result
+}
+
+func hasUsefulMetrics(result Result) bool {
+	return result.TotalPages != nil || result.PrintedLengthKM != nil || result.ConsumablePercent != nil
 }
 
 func uniqueStrings(values []string) []string {
