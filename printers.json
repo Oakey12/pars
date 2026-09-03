@@ -31,7 +31,7 @@
     {"name":"Kyocera M2040dn","address":"192.168.50.30","location":"Офис Екатеринбург","serial_number":"VCF8312300","protocol":"http"},
     {"name":"Kyocera M2030dn — Старый, не подключён","address":"192.168.50.151","location":"Офис Екатеринбург","enabled":false},
     {"name":"Kyocera P3155dn — Резерв","address":"192.168.50.33","location":"Офис Екатеринбург","serial_number":"R4B0561136"},
-    {"name":"Kyocera P2335dn — Склад","address":"192.168.50.31","location":"Офис Екатеринбург","serial_number":"R5J8708468"},
+    {"name":"Kyocera P2335dn — Склад","address":"192.168.50.31","location":"Офис Екатеринбург","serial_number":"R5J8708468","protocol":"http"},
 
     {"name":"Kyocera M2635dn","address":"192.168.60.30","location":"Офис Самара"},
     {"name":"Kyocera 1060dn — USB","address":"192.168.60.31","location":"Офис Самара","enabled":false,"note":"В таблице указано, что принтер подключён к ПК по USB"},

@@ -28,11 +28,13 @@ const (
 )
 
 var (
-	numberPattern  = regexp.MustCompile(`[0-9][0-9\s.,\x{00a0}]*`)
-	percentPattern = regexp.MustCompile(`(?i)([0-9]{1,3}(?:[.,][0-9]+)?)\s*%`)
-	rawLinkPattern = regexp.MustCompile(`(?i)["']([^"'<>]{0,160}(?:counter|count|cnt|status|toner|supply|device|info|consum)[^"'<>]{0,100})["']`)
-	jsArrayPattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*(?:parseInt\s*\(\s*)?["']?\s*([0-9][0-9\s.,]*)`)
-	jsValuePattern = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*(?:toner|remain|level|percent)[a-z0-9_$]*)\s*=\s*["']?\s*([0-9]{1,3})\s*%?`)
+	numberPattern         = regexp.MustCompile(`(?:[0-9]{1,3}(?:[\s\x{00a0}][0-9]{3})+|[0-9]+(?:[.,][0-9]+)?)`)
+	percentPattern        = regexp.MustCompile(`(?i)([0-9]{1,3}(?:[.,][0-9]+)?)\s*%`)
+	rawLinkPattern        = regexp.MustCompile(`(?i)["']([^"'<>]{0,160}(?:counter|count|cnt|status|toner|supply|device|info|consum)[^"'<>]{0,100})["']`)
+	jsArrayPattern        = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*(?:parseInt\s*\(\s*)?["']?\s*([0-9][0-9\s.,]*)`)
+	jsValuePattern        = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*(?:toner|remain|level|percent)[a-z0-9_$]*)\s*=\s*["']?\s*([0-9]{1,3})\s*%?`)
+	jsCounterValuePattern = regexp.MustCompile(`(?im)["']?([a-z_$][a-z0-9_$]*(?:counter|count|pages|impressions)[a-z0-9_$]*)["']?\s*(?:=|:)\s*(?:parseInt\s*\(\s*)?["']?\s*([0-9][0-9\s.,]*)`)
+	jsCounterPushPattern  = regexp.MustCompile(`(?im)\b([a-z_$][a-z0-9_$]*(?:counter|count|pages|impressions)[a-z0-9_$]*)\.push\s*\(\s*["']?\s*([0-9][0-9\s.,]*)`)
 )
 
 var kyoceraPublicPaths = []string{
@@ -279,13 +281,119 @@ func parseKyoceraJavaScript(result *Result, source, path string) {
 	arrays := javascriptArrays(source)
 	if strings.Contains(lowerPath, "prncounter") || (strings.Contains(lowerPath, "counter") && !strings.Contains(lowerPath, "scan")) {
 		parseKyoceraPrintedArrays(result, arrays)
+		if result.TotalPages == nil {
+			parseGenericKyoceraCounter(result, source, arrays, false)
+		}
 	}
 	if strings.Contains(lowerPath, "scancounter") {
 		parseKyoceraScannedArrays(result, arrays)
+		if result.PageMetrics == nil || result.PageMetrics.ScannedTotal == nil {
+			parseGenericKyoceraCounter(result, source, arrays, true)
+		}
 	}
 	if strings.Contains(lowerPath, "toner") && result.ConsumablePercent == nil {
 		parseKyoceraTonerJavaScript(result, source, arrays)
 	}
+}
+
+func parseGenericKyoceraCounter(result *Result, source string, arrays map[string]map[int]int64, scanned bool) {
+	values := genericCounterValues(source, arrays)
+	if len(values) == 0 {
+		return
+	}
+	total := likelyCounterTotal(values)
+	metrics := ensurePageMetrics(result)
+	if scanned {
+		metrics.ScannedTotal = int64Pointer(total)
+		if len(values) == 1 {
+			metrics.ScannedOther = int64Pointer(total)
+		}
+	} else {
+		metrics.PrintedTotal = int64Pointer(total)
+		result.TotalPages = metrics.PrintedTotal
+		if len(values) == 1 {
+			metrics.PrintedPrinter = int64Pointer(total)
+		}
+	}
+	markWebMetrics(result)
+}
+
+func genericCounterValues(source string, arrays map[string]map[int]int64) []int64 {
+	var values []int64
+	for name, indexed := range arrays {
+		if !isGenericCounterName(name) {
+			continue
+		}
+		for _, value := range indexed {
+			values = append(values, value)
+		}
+	}
+	for _, pattern := range []*regexp.Regexp{jsCounterValuePattern, jsCounterPushPattern} {
+		for _, match := range pattern.FindAllStringSubmatch(source, -1) {
+			if !isGenericCounterName(strings.ToLower(match[1])) {
+				continue
+			}
+			value, err := strconv.ParseInt(onlyDigits(match[2]), 10, 64)
+			if err == nil {
+				values = append(values, value)
+			}
+		}
+	}
+	return uniqueCounterValues(values)
+}
+
+func isGenericCounterName(name string) bool {
+	if !containsAny(name, "counter", "count", "pages", "impressions", "cntr") {
+		return false
+	}
+	if containsAny(name, "support", "enable", "selected", "index", "length", "size", "type", "mode", "common") {
+		return false
+	}
+	return true
+}
+
+func uniqueCounterValues(values []int64) []int64 {
+	seen := make(map[int64]bool)
+	var result []int64
+	for _, value := range values {
+		if value < 0 || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	if len(result) > 1 {
+		var largest int64
+		for _, value := range result {
+			if value > largest {
+				largest = value
+			}
+		}
+		if largest >= 100 {
+			filtered := result[:0]
+			for _, value := range result {
+				if value > 10 || value == 0 {
+					filtered = append(filtered, value)
+				}
+			}
+			result = filtered
+		}
+	}
+	return result
+}
+
+func likelyCounterTotal(values []int64) int64 {
+	var sum, largest int64
+	for _, value := range values {
+		sum += value
+		if value > largest {
+			largest = value
+		}
+	}
+	if len(values) > 1 && sum-largest == largest {
+		return largest
+	}
+	return sum
 }
 
 func javascriptArrays(source string) map[string]map[int]int64 {
@@ -383,7 +491,7 @@ func parseKyoceraScannedArrays(result *Result, arrays map[string]map[int]int64) 
 func parseKyoceraTonerJavaScript(result *Result, source string, arrays map[string]map[int]int64) {
 	var levels []float64
 	for name, values := range arrays {
-		if !containsAny(name, "remain", "level", "percent") {
+		if !isTonerLevelName(name) {
 			continue
 		}
 		for _, value := range values {
@@ -395,6 +503,17 @@ func parseKyoceraTonerJavaScript(result *Result, source string, arrays map[strin
 	for _, match := range jsValuePattern.FindAllStringSubmatch(source, -1) {
 		value, err := strconv.ParseFloat(match[2], 64)
 		if err == nil && value >= 0 && value <= 100 && containsAny(strings.ToLower(match[1]), "remain", "level", "percent") {
+			levels = append(levels, value)
+		}
+	}
+	for _, match := range percentPattern.FindAllStringSubmatchIndex(source, -1) {
+		start := max(0, match[0]-120)
+		end := min(len(source), match[1]+120)
+		if !containsAny(strings.ToLower(source[start:end]), "toner", "тонер") {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.ReplaceAll(source[match[2]:match[3]], ",", "."), 64)
+		if err == nil && value >= 0 && value <= 100 {
 			levels = append(levels, value)
 		}
 	}
@@ -416,6 +535,16 @@ func parseKyoceraTonerJavaScript(result *Result, source string, arrays map[strin
 	result.TonerPercent = float64Pointer(value)
 	result.ConsumablePercent = float64Pointer(value)
 	markWebMetrics(result)
+}
+
+func isTonerLevelName(name string) bool {
+	if !strings.Contains(name, "toner") && !strings.Contains(name, "remain") {
+		return false
+	}
+	if containsAny(name, "type", "count", "number", "capacity", "max", "support", "enable") {
+		return false
+	}
+	return containsAny(name, "remain", "level", "percent", "black", "cyan", "magenta", "yellow") || name == "toner"
 }
 
 func ensurePageMetrics(result *Result) *PageMetrics {
@@ -460,6 +589,20 @@ func parseWebPage(result *Result, doc *html.Node) {
 	for _, supply := range parseWebSupplies(doc) {
 		if !hasEquivalentSupply(result.Supplies, supply) {
 			result.Supplies = append(result.Supplies, supply)
+		}
+	}
+	if result.ConsumablePercent == nil {
+		if percent := parseFlatToner(pageText); percent != nil {
+			result.Supplies = append(result.Supplies, Supply{
+				Index:            "http.page.toner",
+				Description:      "Black toner",
+				Class:            "consumed",
+				Type:             "toner",
+				Unit:             "percent",
+				RemainingPercent: percent,
+				PercentSource:    "web page Toner section",
+				LevelState:       "value",
+			})
 		}
 	}
 	if percent := lowestTonerPercent(result.Supplies); percent != nil {
@@ -522,17 +665,44 @@ func parseFlatCounters(metrics *PageMetrics, text string) {
 		if scannedStart > printedStart {
 			end = scannedStart
 		}
-		metrics.PrintedTotal = labelledNumber(text[printedStart:end], "общий", "итого", "total")
+		section := text[printedStart:end]
+		metrics.PrintedTotal = labelledNumber(section, "общий", "итого", "total")
+		if metrics.PrintedTotal != nil && !containsAny(section, "копирование", "copy", "принтер", "printer") {
+			metrics.PrintedPrinter = int64Pointer(*metrics.PrintedTotal)
+		}
 	}
 	if scannedStart >= 0 && metrics.ScannedTotal == nil {
 		metrics.ScannedTotal = labelledNumber(text[scannedStart:], "общий", "итого", "total")
 	}
 }
 
+func parseFlatToner(text string) *float64 {
+	lower := strings.ToLower(text)
+	start := firstKeyword(lower, "тонер", "toner")
+	if start < 0 {
+		return nil
+	}
+	end := min(len(text), start+800)
+	match := percentPattern.FindStringSubmatch(text[start:end])
+	if len(match) != 2 {
+		return nil
+	}
+	value, err := strconv.ParseFloat(strings.ReplaceAll(match[1], ",", "."), 64)
+	if err != nil || value < 0 || value > 100 {
+		return nil
+	}
+	return float64Pointer(value)
+}
+
 func parseWebSupplies(doc *html.Node) []Supply {
 	var supplies []Supply
-	for _, element := range append(findElements(doc, "tr"), findElements(doc, "li")...) {
+	elements := append(findElements(doc, "tr"), findElements(doc, "li")...)
+	elements = append(elements, findElements(doc, "div")...)
+	for _, element := range elements {
 		text := normalizeText(nodeTextWithAttributes(element))
+		if len([]rune(text)) > 350 {
+			continue
+		}
 		lower := strings.ToLower(text)
 		if !containsAny(lower, "toner", "тонер", "cartridge", "картридж") {
 			continue

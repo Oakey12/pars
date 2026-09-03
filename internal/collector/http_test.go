@@ -137,3 +137,53 @@ func TestSummarizeHTTPFailures(t *testing.T) {
 		t.Fatalf("summary = %q", got)
 	}
 }
+
+func TestGenericKyoceraCounterAndTonerVariables(t *testing.T) {
+	result := Result{}
+	parseKyoceraJavaScript(&result, `pageCountValues[7] = "106 297";`, "/custom/printer-counter.js")
+	parseKyoceraJavaScript(&result, `blackTonerLevel = 6;`, "/custom/toner-status.js")
+	if result.TotalPages == nil || *result.TotalPages != 106297 {
+		t.Fatalf("printed total = %v", result.TotalPages)
+	}
+	if result.PageMetrics == nil || result.PageMetrics.PrintedPrinter == nil || *result.PageMetrics.PrintedPrinter != 106297 {
+		t.Fatalf("page metrics = %+v", result.PageMetrics)
+	}
+	if result.ConsumablePercent == nil || *result.ConsumablePercent != 6 {
+		t.Fatalf("toner = %v", result.ConsumablePercent)
+	}
+}
+
+func TestLikelyCounterTotalAvoidsDoubleCountingDisplayedTotal(t *testing.T) {
+	if got := likelyCounterTotal([]int64{12604, 190990, 203594}); got != 203594 {
+		t.Fatalf("total = %d", got)
+	}
+}
+
+func TestWebParsesPrinterOnlyCounterAndTonerBySectionHeaders(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `<html><body>KYOCERA Command Center RX
+		<section><h2>Тонер</h2><table><tr><td>Черный</td><td>6%</td></tr></table></section>
+		<a href="/counter">Счетчик</a></body></html>`)
+	})
+	mux.HandleFunc("/counter", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `<html><body><h2>Напечатанные страницы</h2><table>
+		<tr><th>Функция</th><th>Черно-белый</th><th>Общий</th></tr>
+		<tr><td>Общий</td><td>106297</td><td>106297</td></tr></table></body></html>`)
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	host, _, _ := net.SplitHostPort(u.Host)
+
+	result := (Web{Timeout: time.Second}).Collect(config.Printer{Address: host, HTTPURL: server.URL + "/"})
+	if result.TotalPages == nil || *result.TotalPages != 106297 {
+		t.Fatalf("printed total = %v", result.TotalPages)
+	}
+	if result.PageMetrics == nil || result.PageMetrics.PrintedPrinter == nil || *result.PageMetrics.PrintedPrinter != 106297 {
+		t.Fatalf("page metrics = %+v", result.PageMetrics)
+	}
+	if result.ConsumablePercent == nil || *result.ConsumablePercent != 6 {
+		t.Fatalf("toner = %v", result.ConsumablePercent)
+	}
+}
